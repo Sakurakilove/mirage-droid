@@ -491,7 +491,11 @@ static int import_from_dir(const char *source, const char *out_dir,
         if (dl__file_size(from) < 0) {
             continue; /* ota.json may name optional files */
         }
-        rc = dl__copy_file(from, to, &copied);
+        if (dl__is_dir(from)) {
+            rc = dl__copy_tree(from, to, &copied);
+        } else {
+            rc = dl__copy_file(from, to, &copied);
+        }
         if (rc != DL_OK) {
             return rc;
         }

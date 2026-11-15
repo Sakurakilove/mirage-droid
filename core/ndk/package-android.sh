@@ -19,6 +19,8 @@
 #   --out <dir>        output directory (required)
 #   --build <dir>      QEMU build directory       (default: $WORK/build-qemu)
 #   --binary <file>    QEMU executable            (default: <build>/qemu-system-arm)
+#   --qemu-src <dir>   qemu-miwear checkout, for pc-bios/keymaps
+#                                                 (default: <repo>/core/qemu)
 #   ANDROID_NDK_ROOT   NDK root                   (default: /opt/android-ndk-${NDK_VERSION})
 #   DEPS               dependency prefix          (default: /opt/mirage-deps)
 #   WORK               scratch dir                (default: <repo>/.ndk-work)
@@ -34,6 +36,7 @@ DEPS="${DEPS:-/opt/mirage-deps}"
 REPO=$(cd "$HERE/../.." && pwd)
 WORK="${WORK:-$REPO/.ndk-work}"
 BUILD="${BUILD:-$WORK/build-qemu}"
+QEMU_SRC="${QEMU_SRC:-$REPO/core/qemu}"
 BINARY=""
 OUT=""
 
@@ -42,6 +45,7 @@ while [ $# -gt 0 ]; do
         --out) OUT="$2"; shift 2 ;;
         --build) BUILD="$2"; shift 2 ;;
         --binary) BINARY="$2"; shift 2 ;;
+        --qemu-src) QEMU_SRC="$2"; shift 2 ;;
         -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -199,6 +203,21 @@ for n in $(needed_of "$LIBDIR/libqemu-system-arm.so"); do
     short=$(short_name "$n")
     [ -e "$LIBDIR/$short" ] || fail "libqemu-system-arm.so needs $n, bundle has no $short"
 done
+
+# --- VNC keymaps -----------------------------------------------------------
+# The VNC server maps client keysyms through QEMU's keymap tables; the Android
+# app passes `-L <dir>` pointing at this tree (Mirage looks for
+# <dir>/keymaps/en-us), which is why the app needs the keymaps next to the
+# binary instead of the build host's share/qemu.
+KEYMAPS="$QEMU_SRC/pc-bios/keymaps"
+if [ -d "$KEYMAPS" ]; then
+    mkdir -p "$OUT/share/qemu"
+    cp -R "$KEYMAPS" "$OUT/share/qemu/keymaps"
+    [ -f "$OUT/share/qemu/keymaps/en-us" ] || \
+        echo "warning: $KEYMAPS/en-us is missing" >&2
+else
+    echo "warning: $KEYMAPS not found; the package will have no VNC keymaps" >&2
+fi
 
 # --- tar for the CI artifact ----------------------------------------------
 parent=$(cd "$OUT/.." && pwd)

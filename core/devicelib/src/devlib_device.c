@@ -5,6 +5,7 @@
  * romfs (or yaffs2 /system), the optional eMMC image and the bind
  * databases in the erased /data partition.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,22 @@ int dl_nor_install_ap(const char *nor_path, const char *ap_path, uint64_t offset
 /* Bind detection: which Bluetooth database the firmware opens         */
 /* ------------------------------------------------------------------ */
 
+/* Portable memmem: find `needle` in `haystack`. */
+static const uint8_t *find_bytes(const uint8_t *haystack, size_t haystack_len,
+                                const char *needle)
+{
+    size_t nlen = strlen(needle);
+    if (nlen == 0 || haystack_len < nlen) {
+        return NULL;
+    }
+    for (size_t i = 0; i + nlen <= haystack_len; i++) {
+        if (!memcmp(haystack + i, needle, nlen)) {
+            return haystack + i;
+        }
+    }
+    return NULL;
+}
+
 static const char *bt_database_for(const char *ap_path, char *scratch, size_t cap)
 {
     FILE *f = fopen(ap_path, "rb");
@@ -102,7 +119,7 @@ static const char *bt_database_for(const char *ap_path, char *scratch, size_t ca
         char buf[1 << 16];
         size_t n;
         while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-            if (memmem(buf, n, "/data/misc/bt/bt_config.db", 25)) {
+            if (find_bytes((const uint8_t *)buf, n, "/data/misc/bt/bt_config.db")) {
                 fclose(f);
                 return "bt_config.db";
             }
@@ -112,6 +129,25 @@ static const char *bt_database_for(const char *ap_path, char *scratch, size_t ca
     (void)scratch;
     (void)cap;
     return "bt_storage.db";
+}
+
+/* Case-insensitive equality of two "AA:BB:.." strings without strcasecmp. */
+static int mac_equal(const char *a, const char *b)
+{
+    while (*a && *b) {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca >= 'a' && ca <= 'z') {
+            ca = (unsigned char)(ca - 'a' + 'A');
+        }
+        if (cb >= 'a' && cb <= 'z') {
+            cb = (unsigned char)(cb - 'a' + 'A');
+        }
+        if (ca != cb) {
+            return 0;
+        }
+    }
+    return *a == 0 && *b == 0;
 }
 
 /* Writes the bind databases into the erased /data partition. */
@@ -390,7 +426,7 @@ int dl_verify_device(const dl_profile *profile, const char *nor_path,
                         if (identity) {
                             if (strcmp(read.did, identity->did) != 0 ||
                                 strcmp(read.psn, identity->psn) != 0 ||
-                                strcasecmp(read.mac_bt, identity->mac_bt) != 0) {
+                                !mac_equal(read.mac_bt, identity->mac_bt)) {
                                 out->ok = 0;
                                 verify_append(out, "factory: identity mismatch\n");
                             }

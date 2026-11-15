@@ -31,7 +31,7 @@ fi
 
 BASE_CFLAGS="-O2 -g -std=c11 -Wall -Wextra -Wno-unused-parameter -fno-strict-aliasing"
 INCLUDES="-I$ROOT/core/devicelib/include -I$ROOT/core/devicelib/src -I$ROOT/core/littlefs -I$ROOT/core/devicelib/third_party/miniz"
-DEFINES="-D_FILE_OFFSET_BITS=64 -DLFS_MULTIVERSION -DMINIZ_NO_TIME"
+DEFINES="-D_GNU_SOURCE -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 -DLFS_MULTIVERSION -DMINIZ_NO_TIME"
 USER_CFLAGS=${CFLAGS:-}
 
 SOURCES=(

@@ -29,9 +29,13 @@ MKDEVICE = os.environ.get("MKDEVICE", os.path.join(ROOT, "build", "devlib", "mkd
 P65_FW = os.environ.get("DEVLIB_P65_FW", "/data/data/com.termux/files/home/lua/work/fw/out")
 Q66_FW = os.environ.get("DEVLIB_Q66_FW",
                         "/data/data/com.termux/files/home/lua/work/band11/ext179")
+# Original official OTA package (a ZIP despite the .bin name); optional.
+REAL_OTA = os.environ.get("DEVLIB_OTA_ZIP",
+                          "/data/data/com.termux/files/home/lua/work/fw/fw.bin")
 STRIDE = 2048 + 64
 
 failures = []
+skips = []
 checks = [0]
 
 
@@ -41,6 +45,11 @@ def check(cond, msg):
         failures.append(msg)
         print("FAIL: %s" % msg)
     return cond
+
+
+def skip(what, why):
+    skips.append("%s (%s)" % (what, why))
+    print("SKIP: %s — %s" % (what, why))
 
 
 def run(*args, expect=0):
@@ -229,7 +238,7 @@ def test_nand(tmp):
         out, _, _ = run("factory-read", "--profile", "p65", "--image", nor)
         check("ro.factory.did=" in out, "provisioned NOR holds the p65 record")
     else:
-        print("skip: P65 firmware not present at %s" % P65_FW)
+        skip("full p65 NAND image", "no P65 firmware at %s" % P65_FW)
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +247,7 @@ def test_nand(tmp):
 
 def test_romfs():
     if not os.path.isfile(os.path.join(P65_FW, "vela_resource.bin")):
-        print("skip: P65 resource not present")
+        skip("romfs reader on real resource", "no P65 resource at %s" % P65_FW)
         return
     res = os.path.join(P65_FW, "vela_resource.bin")
     check(run("romfs-list", "--image", res)[0] != "", "romfs root is not empty")
@@ -285,6 +294,28 @@ def test_ota_zip(tmp):
         "--no-bind", "--no-verify")
     check(os.path.getsize(os.path.join(dev, "nor.img")) == 0x1000000,
           "provision from an unpacked directory")
+
+
+# ---------------------------------------------------------------------------
+# 7b. import of a real official OTA package (optional)
+# ---------------------------------------------------------------------------
+
+def test_real_ota(tmp):
+    if not os.path.isfile(REAL_OTA):
+        skip("real OTA package import", "no official OTA package at %s" % REAL_OTA)
+        return
+    fw = os.path.join(tmp, "real-fw")
+    out, _, _ = run("ota-import", "--zip", REAL_OTA, "--out", fw)
+    check("miwear.watch." in out, "real OTA package product parsed")
+    ap = os.path.join(fw, "vela_ap.bin")
+    res = os.path.join(fw, "vela_resource.bin")
+    check(os.path.getsize(ap) > 1 << 20, "real OTA vela_ap.bin extracted")
+    check(os.path.getsize(res) > 1 << 20, "real OTA vela_resource.bin extracted")
+    check(read_at(res, 0, 8) == b"-rom1fs-", "real OTA resource is a romfs")
+    info, _, _ = run("ap-info", "--ap", ap, "--json")
+    parsed = json.loads(info)
+    check(parsed["chip"] != "" and parsed["flashSize"] > 0,
+          "real OTA boot info parsed")
 
 
 # ---------------------------------------------------------------------------
@@ -347,11 +378,17 @@ def main():
         test_nand(tmp)
         test_romfs()
         test_ota_zip(tmp)
+        test_real_ota(tmp)
         test_emmc(tmp)
         test_failures(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("%d checks, %d failure(s)" % (checks[0], len(failures)))
+    print("%d checks, %d failure(s), %d skipped" % (checks[0], len(failures), len(skips)))
+    for reason in skips:
+        print("  skipped: %s" % reason)
+    if skips:
+        print("NOTE: skipped cases need local firmware (set DEVLIB_P65_FW / "
+              "DEVLIB_Q66_FW / DEVLIB_OTA_ZIP to run them)")
     return 0 if not failures else 1
 
 

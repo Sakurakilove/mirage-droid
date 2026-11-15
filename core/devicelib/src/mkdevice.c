@@ -530,7 +530,11 @@ static int cmd_provision(int argc, char **argv)
             fprintf(stderr, "%s\n", dl_last_error());
             return 1;
         }
-        dl_bind_generate(seed_of(argc, argv) ^ 0x9E3779B9u, &ctx.bind);
+        /* Keep the device's existing bind keys: rewriting them would make
+         * the seeded /data databases disagree with identity.properties. */
+        if (!ctx.bind.bound) {
+            dl_bind_generate(seed_of(argc, argv) ^ 0x9E3779B9u, &ctx.bind);
+        }
         ctx.bind_set = 1;
     } else if (parse_identity(argc, argv, p, &ctx) != 0) {
         return 1;

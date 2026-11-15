@@ -64,6 +64,7 @@ int dl__write_file(const char *path, const void *data, size_t size);
 int64_t dl__file_size(const char *path);
 int dl__mkdirs(const char *path);
 int dl__copy_file(const char *from, const char *to, uint64_t *copied);
+int dl__copy_tree(const char *from_dir, const char *to_dir, uint64_t *copied);
 int dl__is_dir(const char *path);
 int dl__path_join(char *out, size_t cap, const char *dir, const char *name);
 

@@ -35,6 +35,7 @@ export NDK ANDROID_NDK_ROOT="$NDK" DEPS WORK NDK_API MIRAGE_CCACHE="${MIRAGE_CCA
 
 mkdir -p "$WORK/cross" "$WORK/logs"
 "$HERE/gen-cross.sh" --api "$NDK_API" "$WORK/cross" > "$WORK/logs/gen-cross.log"
+"$HERE/apply-patches.sh" "$QEMU_SRC"
 SHIM="$WORK/cross/shim"
 BUILD="$WORK/build-qemu"
 

@@ -222,10 +222,14 @@ static int walk_tree(const char *dir, uint32_t parent, file_list *l)
             names = grown;
             cap = ncap;
         }
-        names[nnames] = strdup(ent->d_name);
-        if (!names[nnames]) {
-            rc = DL_ERR_IO;
-            goto out;
+        {
+            size_t len = strlen(ent->d_name) + 1;
+            names[nnames] = malloc(len);
+            if (!names[nnames]) {
+                rc = DL_ERR_IO;
+                goto out;
+            }
+            memcpy(names[nnames], ent->d_name, len);
         }
         nnames++;
     }

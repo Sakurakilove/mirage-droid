@@ -28,7 +28,7 @@ typedef struct {
     char name[64];
     uint64_t offset;
     uint64_t size;
-    const char *source;   /* NULL = blank */
+    char source[4096];    /* empty = blank partition */
 } gpt_part;
 
 /* UUIDv5 = SHA-1(namespace || name), then version/variant bits. */
@@ -135,10 +135,7 @@ static int build_layout(const dl_emmc_spec *spec, const char *firmware_dir,
         snprintf(parts[n].name, sizeof(parts[n].name), "%s", spec->romfs[i]);
         parts[n].offset = off;
         parts[n].size = align_up((uint64_t)size, ALIGN_MIB);
-        parts[n].source = strdup(path);
-        if (!parts[n].source) {
-            return DL_ERR_IO;
-        }
+        snprintf(parts[n].source, sizeof(parts[n].source), "%s", path);
         off += parts[n].size;
         n++;
     }
@@ -146,7 +143,7 @@ static int build_layout(const dl_emmc_spec *spec, const char *firmware_dir,
         snprintf(parts[n].name, sizeof(parts[n].name), "%s", spec->blank[i].name);
         parts[n].offset = off;
         parts[n].size = (uint64_t)spec->blank[i].mib << 20;
-        parts[n].source = NULL;
+        parts[n].source[0] = 0;
         off += parts[n].size;
         n++;
     }
@@ -249,7 +246,7 @@ int dl_emmc_build(const char *path, const dl_emmc_spec *spec, const char *firmwa
     }
 
     for (int i = 0; i < count; i++) {
-        if (!parts[i].source) {
+        if (!parts[i].source[0]) {
             continue;
         }
         {
@@ -286,9 +283,6 @@ int dl_emmc_build(const char *path, const dl_emmc_spec *spec, const char *firmwa
 out:
     if (f) {
         fclose(f);
-    }
-    for (int i = 0; i < 32; i++) {
-        free((void *)parts[i].source);
     }
     return rc;
 }

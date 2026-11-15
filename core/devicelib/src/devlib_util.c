@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -211,6 +212,55 @@ int dl__copy_file(const char *from, const char *to, uint64_t *copied)
         *copied = total;
     }
     return DL_OK;
+}
+
+/* Recursively copies a directory tree (used by OTA import for the
+ * package's "system" directory). */
+int dl__copy_tree(const char *from_dir, const char *to_dir, uint64_t *copied)
+{
+    DIR *d = opendir(from_dir);
+    struct dirent *ent;
+    uint64_t total = 0;
+    int rc = DL_OK;
+
+    if (!d) {
+        dl_set_error("cannot open %s", from_dir);
+        return DL_ERR_IO;
+    }
+    if (dl__mkdirs(to_dir) != DL_OK) {
+        closedir(d);
+        return DL_ERR_IO;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char from[4096], to[4096];
+        struct stat st;
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
+            continue;
+        }
+        if (dl__path_join(from, sizeof(from), from_dir, ent->d_name) != DL_OK ||
+            dl__path_join(to, sizeof(to), to_dir, ent->d_name) != DL_OK) {
+            rc = DL_ERR_INVALID;
+            break;
+        }
+        if (stat(from, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            rc = dl__copy_tree(from, to, &total);
+        } else if (S_ISREG(st.st_mode)) {
+            uint64_t n = 0;
+            rc = dl__copy_file(from, to, &n);
+            total += n;
+        }
+        if (rc != DL_OK) {
+            break;
+        }
+    }
+    closedir(d);
+    if (copied) {
+        *copied += total;
+    }
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
