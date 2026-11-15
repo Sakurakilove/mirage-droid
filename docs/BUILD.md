@@ -1,13 +1,17 @@
 # 构建与发布（BUILD）
 
-本文覆盖 MirageDroid 的**本地构建**与 **CI 全流程**：产物在哪、怎么复现、失败怎么查。
+本文覆盖 MirageDroid 的 **CI 全流程**与可选的本地检查：产物在哪、怎么复现、失败怎么查。
 发布侧的 Secrets/Release 约定见 [`.github/workflows/README.md`](../.github/workflows/README.md)。
+
+> **本仓库所有编译（Gradle APK、devicelib、QEMU 交叉编译、固件冒烟用的宿主 QEMU）全部在 GitHub Actions 完成。**
+> 本地不要求、也不建议编译；本机只做文件检查（YAML/Python/脚本 lint）或直接运行 CI 产物。
+> 下文本地命令均标注为「可选，CI 已覆盖」，仅用于排障或离线验证。
 
 ## 0. 前提
 
 | 用途 | 需要 | 说明 |
 | --- | --- | --- |
-| Android APK | JDK 21 + Android SDK（platform 35 / build-tools） | 重活也可全部交给 CI |
+| Android APK | JDK 21 + Android SDK（platform 35 / build-tools） | 全部由 CI 完成；本地构建仅排障 |
 | 纯 JVM 单测 | JDK 21 + Android SDK | AGP 配置阶段需要 SDK 路径 |
 | devicelib 宿主构建 | `gcc`/`clang`、`cmake`（可选）、`python3` | Linux / Termux 均可 |
 | QEMU 宿主构建 | `meson`、`ninja`、`glib`、`pixman`、`pkg-config` | 见 `scripts/ci/`（qemu-core 提供） |
@@ -16,9 +20,9 @@
 本地 Gradle：本仓库尚未提交 `gradle/wrapper`，CI 用 `gradle/actions/setup-gradle@v4` 固定
 `gradle-version: '8.10.2'`。本地请用 Gradle **8.10.2**（`gradle -v` 确认），不要混用 other 版本。
 
-## 1. 本地构建
+## 1. 本地检查 / 构建（可选，CI 已覆盖）
 
-### 1.1 纯 JVM 单测（最快）
+### 1.1 纯 JVM 单测（可选，CI 已覆盖）
 
 ```bash
 export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"   # 按本机路径改
@@ -26,7 +30,7 @@ gradle :app:testDebugUnitTest
 # 报告：app/build/reports/tests/testDebugUnitTest/index.html
 ```
 
-### 1.2 debug APK
+### 1.2 debug APK（可选，CI 已覆盖）
 
 ```bash
 gradle :app:assembleDebug
@@ -39,7 +43,7 @@ gradle :app:assembleDebug
 bash scripts/dev/install_apk.sh app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### 1.3 devicelib（宿主侧）
+### 1.3 devicelib（宿主侧，可选，CI 已覆盖）
 
 ```bash
 bash tools/build_devlib.sh      # gcc/clang 编 mkdevice 与单测目标；产物 build/devlib/mkdevice
@@ -50,10 +54,10 @@ python3 tools/test_devlib.py    # 镜像尺寸/magic/littlefs/p65Record 断言
 > 脚本由 devicecore 提供；`tools/build_devlib.sh` 尚未合入时 host-tests 会自动 SKIP。
 > 构建成功后 `build/devlib/mkdevice self-test` 会自检；需要真机固件的检查在 CI 上自动跳过。
 
-### 1.4 QEMU 宿主构建（可选）
+### 1.4 QEMU 宿主构建（仅排障，不推荐；CI 的 firmware-smoke 已覆盖真实开机验证）
 
 ```bash
-# 脚本由 qemu-core 提供；缺失时 firmware-smoke 手动运行会 SKIP 并提示
+# 脚本由 qemu-core 提供；本地执行仅排障，CI 的 firmware-smoke 已覆盖
 QEMU_SRC=work/ci-release/qemu-src bash scripts/ci/build-qemu-native.sh work/ci-release/qemu-native
 # 产物：work/ci-release/qemu-native/qemu-system-arm
 ```
@@ -62,7 +66,8 @@ QEMU_SRC=work/ci-release/qemu-src bash scripts/ci/build-qemu-native.sh work/ci-r
 （`libpng-dev` 是 QMP `screendump format=png` 的编译期依赖；缺了截图会失败）。
 脚本内部会 clone/复用固定 commit 的 qemu-miwear（`dp-1700-exp`），可重复调用（增量构建）。
 
-只做 Android 侧时不需要 QEMU 源码构建：CI 的 `qemu-android.yml` 产出 NDK 交叉编译产物。
+只做 Android 侧时不需要 QEMU 源码构建：CI 的 `qemu-android.yml` 产出 NDK 交叉编译产物，
+`firmware-smoke.yml` 在 CI 上完成宿主 QEMU 编译 + 真实固件开机验证。
 
 ## 2. CI 全流程
 
@@ -70,8 +75,8 @@ QEMU_SRC=work/ci-release/qemu-src bash scripts/ci/build-qemu-native.sh work/ci-r
 | --- | --- | --- | --- |
 | `android.yml` | push/PR（app/core/gradle 相关路径）、手动 | ~2–3 min | Artifact `mirage-droid-debug`（debug APK）、`android-test-report` |
 | `host-tests.yml` | push/PR（相关路径）、手动 | ~3–6 min | Artifact `junit-report`、`devicelib-logs` |
-| `qemu-android.yml` | 相关路径/手动（qemu-core） | 5–40 min（ccache 命中与否） | QEMU 交叉编译产物（arm64-v8a） |
-| `firmware-smoke.yml` | **仅手动** `workflow_dispatch` | 30–60 min | 截图 PNG + 序列日志（临时，固件不入 artifact） |
+| `qemu-android.yml` | `core/ndk/**`、`scripts/ci/**`、自身变化 / 手动（qemu-core） | 20–40 min（ccache 命中后 5–10 min） | Artifact `qemu-android-arm64`（`libqemu-system-arm.so` + 依赖，arm64-v8a）、失败时 `qemu-android-logs` |
+| `firmware-smoke.yml` | **仅手动** `workflow_dispatch` | 30–60 min | 截图 PNG + UART/QEMU/console 日志（**唯一真实开机验证通道**；固件不入 artifact） |
 | `release.yml` | tag `v*`、手动 | ~4–6 min | GitHub Release（APK + 源码快照 + 校验/合规文件） |
 
 查看运行：
@@ -88,6 +93,14 @@ gh run view <run-id> -R Sakurakilove/mirage-droid --log
 2. `jvm-unit`：`gradle :app:testDebugUnitTest`，JUnit 报告上传，失败可按用例定位。
 3. `host-devicelib`：`bash tools/build_devlib.sh`（gcc）+ 单测 + Python lint。
    devicelib 脚本未合入时打印 `::warning ... SKIP`，**不挡 android 的绿**。
+
+### 2.1.1 固件冒烟（`firmware-smoke.yml`，唯一真实开机验证）
+
+- 手动触发，输入固件直链（`firmware_url`，或 `vela_ap_url`+`vela_resource_url`）、`profile`、超时、非黑阈值。
+- CI 上完成：下载固件到 `$RUNNER_TEMP`（**不缓存、不上传**）→ apt 装 glib/pixman/libpng/meson →
+  `tools/build_devlib.sh`（gcc 编 mkdevice）→ `scripts/ci/build-qemu-native.sh`（宿主 QEMU）→
+  `mkdevice provision`+`verify` → 启动 QEMU → 每 5s QMP `screendump` → `png-nonblack.py` 判定非全黑。
+- 失败会打印 UART/QEMU/console 日志尾部并把截图与日志上传 artifact；固件与镜像永不进入 artifact。
 
 ### 2.2 release 流程
 
@@ -133,7 +146,7 @@ gh workflow run release.yml -R Sakurakilove/mirage-droid -f tag=v0.0.0-ci -f dry
 | APK 体积告警（>100 MiB） | 检查是否误打包 qemu/固件/大资源；`android.yml` 的 APK 大小报告在运行摘要里 |
 | release 签名失败 | 4 个 `KEYSTORE_*` Secrets 必须同时存在；`base64 -d` 能还原 keystore；本地复现：`KEYSTORE_FILE=… bash scripts/release/sign-apk.sh some.apk` |
 | actionlint 报错 | 先跑 `python3 scripts/release/validate_workflows.py` 看结构错误；再用固定版本 actionlint 复核 |
-| `firmware-smoke` 直接 SKIP | 缺少 `scripts/ci/build-qemu-native.sh` 或 `tools/build_devlib.sh`，属依赖未合入，非回归；看运行摘要里的缺失清单 |
+| `firmware-smoke` 报“依赖缺失” | 缺少 `scripts/ci/build-qemu-native.sh` 或 `tools/build_devlib.sh`（已合入；若再出现说明回退/分支不对）。**已收紧为 fail，不再 SKIP** |
 | 固件相关步骤失败但日志无链接 | 固件 URL 需是直链（`curl -fL` 可下载），且 OTA zip 内含 `vela_ap.bin`/`vela_resource.bin` |
 
 ## 6. 相关文档

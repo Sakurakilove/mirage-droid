@@ -11,7 +11,8 @@ name: firmware-smoke
 #   - vela_ap_url + vela_resource_url：分别给两个裸 bin 直链
 #   （直链可以是对象存储的一次性 URL / 私有 release asset 临时链接；URL 会在日志中脱敏）
 #
-# 依赖（尚未合入时本 workflow 会明确 SKIP 而不是失败）：
+# 本 workflow 是**唯一真实开机验证通道**（本仓库所有编译都在 CI 完成，本地不编译）。
+# 依赖（缺失时直接 fail，不 SKIP，避免“看起来绿但没验证”）：
 #   - tools/build_devlib.sh（devicecore）
 #   - scripts/ci/build-qemu-native.sh（qemu-core）
 #   - scripts/release/qmp-screendump.py、scripts/release/png-nonblack.py（本仓库）
@@ -69,8 +70,7 @@ jobs:
         with:
           submodules: false
 
-      - name: 依赖检查（缺失则 SKIP）
-        id: deps
+      - name: 依赖检查（缺失直接失败，不允许“看起来绿”）
         run: |
           set -euo pipefail
           missing=()
@@ -79,21 +79,11 @@ jobs:
           [ -f scripts/release/qmp-screendump.py ] || missing+=("scripts/release/qmp-screendump.py")
           [ -f scripts/release/png-nonblack.py ] || missing+=("scripts/release/png-nonblack.py")
           if [ "${#missing[@]}" -ne 0 ]; then
-            echo "::warning title=固件冒烟跳过::依赖未合入：${missing[*]}"
-            {
-              echo "## 固件冒烟跳过（依赖未就绪）"
-              echo ""
-              for item in "${missing[@]}"; do echo "- 缺少：${item}"; done
-              echo ""
-              echo "依赖合入后重新手动运行即可，无需改本 workflow。"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error title=固件冒烟依赖缺失::以下依赖未合入，冒烟无法执行：${missing[*]}"
+            exit 1
           fi
-          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: 下载固件（仅运行期临时目录）
-        if: steps.deps.outputs.ready == 'true'
         id: fw
         env:
           FIRMWARE_URL: ${{ github.event.inputs.firmware_url }}
@@ -166,7 +156,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 安装构建依赖
-        if: steps.deps.outputs.ready == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -176,7 +165,6 @@ jobs:
             meson ninja-build pkg-config python3-venv
 
       - name: 构建 devicelib（host gcc）
-        if: steps.deps.outputs.ready == 'true'
         id: devlib
         run: |
           set -euo pipefail
@@ -185,7 +173,6 @@ jobs:
           echo "mkdevice=build/devlib/mkdevice" >> "$GITHUB_OUTPUT"
 
       - name: 构建 host 原生 QEMU（qemu-core 脚本）
-        if: steps.deps.outputs.ready == 'true'
         id: qemu
         run: |
           set -euo pipefail
@@ -196,9 +183,9 @@ jobs:
           echo "profile=help:" 
           timeout 60 "$out/qemu-system-arm" -M miwear,profile=help 2>&1 | head -n 20 || true
           echo "qemu=$out/qemu-system-arm" >> "$GITHUB_OUTPUT"
+          echo "qemu_src=$RUNNER_TEMP/qemu-src" >> "$GITHUB_OUTPUT"
 
       - name: 生成设备镜像（mkdevice provision）
-        if: steps.deps.outputs.ready == 'true'
         id: images
         env:
           PROFILE: ${{ github.event.inputs.profile }}
@@ -220,12 +207,12 @@ jobs:
           echo "device=$dev_dir" >> "$GITHUB_OUTPUT"
 
       - name: 启动 QEMU 并判定屏幕非全黑
-        if: steps.deps.outputs.ready == 'true'
         env:
           PROFILE: ${{ github.event.inputs.profile }}
           BOOT_TIMEOUT_SECONDS: ${{ github.event.inputs.boot_timeout_seconds }}
           MIN_RATIO: ${{ github.event.inputs.min_nonblack_ratio }}
           QEMU_BIN: ${{ steps.qemu.outputs.qemu }}
+          QEMU_SRC_DIR: ${{ steps.qemu.outputs.qemu_src }}
           FW_AP: ${{ steps.fw.outputs.ap }}
           DEV_DIR: ${{ steps.images.outputs.device }}
         run: |
@@ -234,7 +221,12 @@ jobs:
           rm -rf "$run_dir"
           mkdir -p "$run_dir"
 
-          # 命令模板来自 qemu-core（Mirage LaunchPlan / P65）：console UART=1，-monitor none 必须给
+          # 命令模板参考 Mirage LaunchPlan（P65）：console UART=1，-monitor none 必须给。
+          # 注意 -serial 是位置参数（QEMU system/vl.c serial_parse 顺序分配 index），不能写 0=/1=/2=。
+          keymap_args=()
+          if [ -n "${QEMU_SRC_DIR:-}" ] && [ -d "$QEMU_SRC_DIR/pc-bios" ]; then
+            keymap_args=(-L "$QEMU_SRC_DIR/pc-bios")
+          fi
           "$QEMU_BIN" \
             -M "miwear,profile=${PROFILE},flash-image=${DEV_DIR}/nor.img,nand-image=${DEV_DIR}/nand.img" \
             -kernel "$FW_AP" \
@@ -244,11 +236,12 @@ jobs:
             -qmp "unix:${run_dir}/qmp.sock,server=on,wait=off" \
             -monitor none \
             -chardev "socket,id=con,unix:${run_dir}/console.sock,server=on,wait=off,logfile=${run_dir}/console.log" \
-            -serial "0=file:${run_dir}/uart0.log" \
-            -serial "1=chardev:con" \
-            -serial "2=file:${run_dir}/uart2.log" \
+            -serial "file:${run_dir}/uart0.log" \
+            -serial "chardev:con" \
+            -serial "file:${run_dir}/uart2.log" \
             -global driver=bes.btss,property=bdaddr,value=AA:BB:CC:DD:EE:FF \
             -D "${run_dir}/qemu.log" \
+            "${keymap_args[@]}" \
             > "$run_dir/qemu.out" 2>&1 &
           qemu_pid=$!
           echo "$qemu_pid" > "$run_dir/qemu.pid"
@@ -300,7 +293,7 @@ jobs:
           echo "冒烟通过：${shot}"
 
       - name: 上传截图与日志（不含固件）
-        if: always() && steps.deps.outputs.ready == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: firmware-smoke-${{ github.event.inputs.profile }}-${{ github.run_id }}
@@ -314,7 +307,7 @@ jobs:
           retention-days: 7
 
       - name: 清理临时固件（尽力而为）
-        if: always() && steps.deps.outputs.ready == 'true'
+        if: always()
         run: |
           set -uo pipefail
           if [ -f "$RUNNER_TEMP/run/qemu.pid" ]; then

@@ -1,7 +1,9 @@
 # GitHub Actions 工作流说明
 
 本目录的 workflow 覆盖：APK 构建、宿主侧测试、QEMU 交叉编译、固件开机冒烟、发布。
-所有重型编译（NDK / QEMU）都在 GitHub Actions 上完成；本地只需 Java 21（可选）即可跑纯 JVM 测试。
+
+> **本仓库所有编译都在 GitHub Actions 完成（Gradle APK / devicelib / QEMU 交叉编译 / 固件冒烟用的宿主 QEMU）。
+> 本地不要求、也不建议编译**；本机只做文件检查（YAML/Python/脚本 lint）或运行 CI 产物。
 
 ## 一览
 
@@ -10,7 +12,7 @@
 | `android.yml` | `push` / `pull_request`（仅 app/core/gradle 相关路径）/ `workflow_dispatch` | ~2–3 min | Artifact `mirage-droid-debug`（debug APK）、`android-test-report` | ci-release |
 | `host-tests.yml` | `push` / `pull_request`（仅相关路径）/ `workflow_dispatch` | ~3–6 min | Artifact `junit-report`、`devicelib-logs` | ci-release |
 | `release.yml` | tag `v*` / `workflow_dispatch` | ~4–6 min | GitHub Release：APK、源码快照、`SHA256SUMS`、`SOURCE-OFFER.md`、`LICENSE` | ci-release |
-| `qemu-android.yml` | 待合入（计划：相关路径 `push` / `workflow_dispatch`） | 5–40 min（ccache 命中与否） | QEMU 交叉编译产物（arm64-v8a，最终进 `jniLibs`） | qemu-core |
+| `qemu-android.yml` | `push`/`pull_request`（`core/ndk/**`、`scripts/ci/**`、自身） / `workflow_dispatch` | 20–40 min（ccache 命中后约 5–10 min） | Artifact `qemu-android-arm64`（`libqemu-system-arm.so` + 依赖，arm64-v8a）、失败时 `qemu-android-logs` | qemu-core |
 | `firmware-smoke.yml` | **仅手动** `workflow_dispatch` | 30–60 min（含宿主 QEMU 构建） | Artifact：截图 PNG + UART/QEMU/console 日志 | ci-release |
 
 > 约定：**任何 workflow 都不下载、不缓存、不上传小米固件**（`vela_ap.bin` / `vela_resource.bin` / OTA zip）。
@@ -75,19 +77,21 @@
   - 其它：`profile`（p65/q66）、`boot_timeout_seconds`、`min_nonblack_ratio`。
 - 为什么是 URL 而不是文件上传：GitHub `workflow_dispatch` 不支持文件输入。请提供一次性直链
   （对象存储 / 私有 release asset 临时链接）；URL 在日志中会被 `::add-mask::` 脱敏。
-- 流程：依赖检查（缺脚本 → SKIP 并在运行摘要说明）→ 下载固件到 `$RUNNER_TEMP/fw` → apt 依赖
+- 定位：**本仓库唯一的真实固件开机验证通道**（所有编译在 CI 完成，本地不编译）。
+- 流程：依赖检查（缺脚本 → **直接 fail**，不 SKIP，避免“看起来绿但没验证”）→ 下载固件到 `$RUNNER_TEMP/fw` → apt 依赖
   （glib/pixman/libpng/meson/ninja）→ `bash tools/build_devlib.sh` → `bash scripts/ci/build-qemu-native.sh` →
   `mkdevice provision` 生成 `nor.img`/`nand.img` → 启动 QEMU（QMP/VNC/console socket）→
   每 5s 通过 QMP `screendump` 截图，`png-nonblack.py` 判定非全黑 → 超时/全黑时打印 UART 尾部并 fail。
 - 产物（artifact，7 天）：`screen.png`、`uart0/uart2/console/qemu` 日志、`provision.log`。
   **固件与设备镜像不会上传**。
-- 依赖状态：`scripts/ci/build-qemu-native.sh`（qemu-core，约定产物 `<outdir>/qemu-system-arm`）
-  未合入前该 workflow 会 SKIP（不 fail）。
+- 依赖：`tools/build_devlib.sh`（devicecore）、`scripts/ci/build-qemu-native.sh`（qemu-core，产物
+  `<outdir>/qemu-system-arm`）已合入；缺失时 workflow 会 fail 并列出缺失项。
 
 ### `qemu-android.yml` — QEMU NDK 交叉编译（qemu-core 负责）
 
-- 不在本文件维护范围；约定：ubuntu-latest + NDK 交叉编译 `arm64-v8a`，产物 `qemu-system-arm` 与依赖 `.so`
-  打包为 artifact（最终改名为 `libqemu-system-arm.so` 放进 App `jniLibs`）。
+- 不在本文件维护范围（qemu-core 负责）；`ubuntu-24.04` 上用 Android NDK 交叉编译 `arm64-v8a`。
+- 缓存：NDK zip、glib/pixman 交叉产物、ccache（**缓存中不含固件**）；产物 `dist/qemu-android-arm64.tar.gz`
+  改名 `libqemu-system-arm.so` 放进 App `jniLibs`，失败时上传 `qemu-android-logs`。
 - 详细参数以 `core/ndk/` 脚本与其 workflow 注释为准。
 
 ## Secrets
