@@ -20,6 +20,7 @@ import os
 import shutil
 import struct
 import subprocess
+import zlib
 import sys
 import tempfile
 import zipfile
@@ -336,6 +337,18 @@ def test_emmc(tmp):
     check(read_at(img, 512, 8) == b"EFI PART", "eMMC GPT header at LBA 1")
     hdr = read_at(img, 512, 92)
     check(struct.unpack_from("<I", hdr, 80)[0] == 128, "GPT entry size 128")
+    # header CRC: bytes 16..19 zeroed, CRC-32 over the 92 header bytes
+    stored_hcrc = struct.unpack_from("<I", hdr, 16)[0]
+    zeroed = hdr[:16] + b"\0\0\0\0" + hdr[20:]
+    check(zlib.crc32(zeroed) & 0xFFFFFFFF == stored_hcrc, "GPT header CRC valid")
+    table = read_at(img, 1024, 128 * 128)
+    check(struct.unpack_from("<I", hdr, 88)[0] == zlib.crc32(table) & 0xFFFFFFFF,
+          "GPT partition-entry array CRC valid")
+    bh = read_at(img, (4 << 30) - 512, 92)
+    check(bh[0:8] == b"EFI PART", "GPT backup header present at the last LBA")
+    bh_stored = struct.unpack_from("<I", bh, 16)[0]
+    bh_zeroed = bh[:16] + b"\0\0\0\0" + bh[20:]
+    check(zlib.crc32(bh_zeroed) & 0xFFFFFFFF == bh_stored, "GPT backup header CRC valid")
     out, _, _ = run("emmc-list", "--image", img)
     names = [line.split()[0] for line in out.splitlines() if line.strip()]
     check(len(names) == 16, "eMMC has 13 romfs + 3 blank partitions (got %d)" % len(names))

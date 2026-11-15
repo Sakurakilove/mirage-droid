@@ -14,6 +14,13 @@ set -euo pipefail
 : "${COMMIT:?缺少 COMMIT}"
 : "${REPO:?缺少 REPO}"
 QEMU_COMMIT="${QEMU_COMMIT:-unset}"
+QEMU_NOTE=""
+if [ "$QEMU_COMMIT" = "unset" ]; then
+  QEMU_NOTE="（仓库尚未引入 qemu-miwear submodule；版本 pin 见 core/ndk/versions.sh）"
+  QEMU_CHECKOUT_BLOCK="# 仓库尚未引入 qemu-miwear submodule；版本 pin 见 core/ndk/versions.sh"
+else
+  QEMU_CHECKOUT_BLOCK="$(printf 'git clone https://github.com/AstralSightStudios/qemu-miwear.git\ncd qemu-miwear && git checkout %s' "$QEMU_COMMIT")"
+fi
 REF="${REF:-$TAG}"
 RUN_URL="${RUN_URL:-—}"
 
@@ -41,14 +48,13 @@ cat >"$template" <<'MD'
 
 | 组件 | 上游 | 版本 | 许可 |
 | --- | --- | --- | --- |
-| qemu-miwear（QEMU 11.1.2 板级分支） | https://github.com/AstralSightStudios/qemu-miwear | submodule 提交 `__QEMU_COMMIT__` | GPL-2.0 |
+| qemu-miwear（QEMU 11.1.2 板级分支） | https://github.com/AstralSightStudios/qemu-miwear | submodule 提交 `__QEMU_COMMIT__`__QEMU_NOTE__ | GPL-2.0 |
 | littlefs | https://github.com/littlefs-project/littlefs | 见 `core/littlefs` | BSD-3-Clause |
 
 获取 qemu-miwear 对应源码：
 
 ```bash
-git clone https://github.com/AstralSightStudios/qemu-miwear.git
-cd qemu-miwear && git checkout __QEMU_COMMIT__
+__QEMU_CHECKOUT_BLOCK__
 ```
 
 ## 3. 构建脚本（可复现构建入口）
@@ -93,4 +99,13 @@ sed \
   -e "s|__QEMU_COMMIT__|${QEMU_COMMIT}|g" \
   -e "s|__REF__|${REF}|g" \
   -e "s|__RUN_URL__|${RUN_URL}|g" \
-  "$template"
+  -e "s|__QEMU_NOTE__|${QEMU_NOTE}|g" \
+  -e "s|__QEMU_COMMIT__|${QEMU_COMMIT}|g" \
+  "$template" |
+  while IFS= read -r line; do
+    if [ "$line" = "__QEMU_CHECKOUT_BLOCK__" ]; then
+      printf '%s\n' "$QEMU_CHECKOUT_BLOCK"
+    else
+      printf '%s\n' "$line"
+    fi
+  done

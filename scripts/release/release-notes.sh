@@ -25,8 +25,14 @@ SOURCE_TARBALL="${SOURCE_TARBALL:-}"
 REPO="${REPO:-Sakurakilove/mirage-droid}"
 RUN_URL="${RUN_URL:-}"
 
+qemu_display="$QEMU_COMMIT"
+if [ "$QEMU_COMMIT" = "unset" ]; then
+  qemu_display="unset（仓库尚未引入 qemu-miwear submodule）"
+fi
+
 signed_note="**debug 签名（仅供测试，不可用于正式分发）**"
 if [ "$SIGNED" = "true" ]; then
+  # shellcheck disable=SC2016  # 反引号是 markdown 代码标记，不需要展开
   signed_note='正式发布签名（`KEYSTORE_*` Secrets 已配置）'
 fi
 
@@ -44,7 +50,7 @@ cat <<EOF
 | 构建类型 | \`${BUILD_TYPE}\` |
 | 签名 | ${signed_note} |
 | 提交 | \`${COMMIT}\` |
-| qemu-miwear submodule | \`${QEMU_COMMIT}\` |
+| qemu-miwear submodule | \`${qemu_display}\` |
 | 触发方式 | tag push / workflow_dispatch |
 | CI 运行 | ${RUN_URL:-—} |
 
@@ -75,7 +81,7 @@ fi)
 ## 许可与源码
 
 - 本项目：**AGPL-3.0**（见 \`LICENSE\`）。本 Release 附完整源码快照，对应构建提交 \`${COMMIT}\`。
-- 模拟核心 [qemu-miwear](https://github.com/AstralSightStudios/qemu-miwear)：**GPL-2.0**，submodule 提交 \`${QEMU_COMMIT}\`；
+- 模拟核心 [qemu-miwear](https://github.com/AstralSightStudios/qemu-miwear)：**GPL-2.0**，submodule 提交 \`${QEMU_COMMIT}\`（unset = 仓库尚未引入 submodule，以 \`core/ndk/versions.sh\` 的 pin 为准）；
   其源码与 \`core/ndk/\` 构建脚本随源码快照一并提供。
 - [littlefs](https://github.com/littlefs-project/littlefs)：BSD-3-Clause。
 - 源码仓库：https://github.com/${REPO}/tree/${TAG}
