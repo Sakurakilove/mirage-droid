@@ -61,7 +61,8 @@ echo "== checks"
 check "main binary is ELF64 AArch64" bash -c "'$READELF' -h '$MAIN' | grep -q 'Class:.*ELF64' && '$READELF' -h '$MAIN' | grep -q 'Machine:.*AArch64'"
 check "main binary interpreter is /system/bin/linker64" bash -c "'$READELF' -l '$MAIN' | grep -q 'interpreter: /system/bin/linker64'"
 
-interp=$("$READELF" -l "$MAIN" | sed -n 's/.*interpreter: \(.*\)/\1/p' | head -1)
+interp=$("$READELF" -l "$MAIN" | sed -n 's/.*interpreter: \([^]]*\).*/\1/p' | head -1)
+interp=${interp%]}
 [ "$interp" = "/system/bin/linker64" ] && echo "       (interpreter: $interp)"
 
 # No glibc linkage: bionic binaries must not mention libc.so.6 / ld-linux.

@@ -196,7 +196,9 @@ for f in "${ELF_FILES[@]}"; do
     hdr=$("$READELF" -h "$f")
     echo "$hdr" | grep -q 'Machine:.*AArch64' || fail "$f is not AArch64"
 done
-interp=$("$READELF" -l "$LIBDIR/libqemu-system-arm.so" | sed -n 's/.*interpreter: \(.*\)/\1/p' | head -1)
+interp=$("$READELF" -l "$LIBDIR/libqemu-system-arm.so" | \
+    sed -n 's/.*interpreter: \([^]]*\).*/\1/p' | head -1)
+interp=${interp%]}
 [ "$interp" = "/system/bin/linker64" ] || fail "unexpected ELF interpreter: '$interp' (want /system/bin/linker64)"
 for n in $(needed_of "$LIBDIR/libqemu-system-arm.so"); do
     is_platform_lib "$n" && continue
