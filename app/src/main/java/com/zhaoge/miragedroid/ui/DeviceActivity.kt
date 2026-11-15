@@ -431,6 +431,7 @@ class DeviceActivity : Activity(), SessionListener {
                     hint.text = "qemu 已启动，VNC 画面稍后到达"
                     button.text = "关机"
                     button.visibility = View.VISIBLE
+                    button.setOnClickListener { session.stop() }
                 } else {
                     overlay.visibility = View.GONE
                 }
@@ -443,6 +444,7 @@ class DeviceActivity : Activity(), SessionListener {
                 hint.text = "首次启动要加载固件，请稍候"
                 button.text = "取消"
                 button.visibility = View.VISIBLE
+                button.setOnClickListener { session.stop() }
                 screenView?.setPlaceholder("正在启动", "加载固件中…")
             }
             SessionState.STOPPING -> {
@@ -455,10 +457,12 @@ class DeviceActivity : Activity(), SessionListener {
                 overlay.visibility = View.VISIBLE
                 title.text = "启动失败"
                 val error = session.lastError ?: "未知错误"
-                hint.text = error.take(420)
-                button.text = "重试"
+                // 提示气泡里放前 8 行（qemu stderr 尾巴），完整内容点按钮看
+                hint.text = error.lineSequence().take(8).joinToString("\n")
+                button.text = "查看详情 / 重试"
                 button.visibility = View.VISIBLE
-                screenView?.setPlaceholder("启动失败", "")
+                button.setOnClickListener { showErrorDetail() }
+                screenView?.setPlaceholder("启动失败", "点「查看详情」看 qemu 输出")
             }
             SessionState.STOPPED -> {
                 overlay.visibility = View.VISIBLE
@@ -474,12 +478,21 @@ class DeviceActivity : Activity(), SessionListener {
                 }
                 button.text = if (hasFirmware && built) "启动设备" else "返回设备库"
                 button.visibility = View.VISIBLE
+                button.setOnClickListener { onOverlayAction() }
                 screenView?.clearFrame()
             }
         }
-        if (button.visibility == View.VISIBLE) {
-            button.setOnClickListener { onOverlayAction() }
-        }
+    }
+
+    /** 启动失败详情：完整错误 + qemu stdout/qemu.log 的末 20 行。 */
+    private fun showErrorDetail() {
+        val error = session.lastError ?: "未知错误"
+        AlertDialog.Builder(this)
+            .setTitle("启动失败")
+            .setMessage(error)
+            .setPositiveButton("重试") { _, _ -> session.start() }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     // ------------------------------------------------------------ 控制台 tab

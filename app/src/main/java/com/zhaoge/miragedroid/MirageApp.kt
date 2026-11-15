@@ -40,13 +40,19 @@ class MirageApp : Application() {
         importer = FirmwareImporter(this, store)
     }
 
-    /** 当前 APK 是否带可执行的 qemu 核心。 */
-    fun qemuExecutable(): File? = QemuLocator.locate(
+    /** 每次重新解析（会顺手 chmod +x）：设置页/设备页都要最新的真实状态。 */
+    fun qemuLocation(): QemuLocator.Location = QemuLocator.resolve(
         applicationInfo.nativeLibraryDir,
         store.settings().qemuPath,
     )
 
-    fun qemuAvailable(): Boolean = qemuExecutable() != null
+    /** 当前 APK 是否带可执行的 qemu 核心。 */
+    fun qemuExecutable(): File? = qemuLocation().file
+
+    fun qemuAvailable(): Boolean = qemuLocation().executable
+
+    /** 核心诊断文本（不存在 / 无执行权限 / 路径），给界面显示。 */
+    fun qemuStatusDetail(): String = qemuLocation().detail
 
     /** devicelib（导入固件/生成镜像）是否可用。 */
     fun deviceLibAvailable(): Boolean = com.zhaoge.miragedroid.data.NativeCore.available()

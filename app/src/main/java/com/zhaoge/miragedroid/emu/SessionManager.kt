@@ -201,13 +201,19 @@ class SessionManager(
                 )
             }
 
-            val executable = QemuLocator.locate(
+            val location = QemuLocator.resolve(
                 context.applicationInfo.nativeLibraryDir,
                 store.settings().qemuPath,
-            ) ?: throw SessionException(
-                "未检测到模拟核心（libqemu-system-arm.so）。当前 APK 不含 qemu 核心，" +
-                    "请安装含模拟核心的构建，或在设置里指定 qemu 可执行文件。",
             )
+            val executable = location.file ?: throw SessionException(
+                "未检测到模拟核心（libqemu-system-arm.so）。当前 APK 不含 qemu 核心，" +
+                    "请安装含模拟核心的构建，或在设置里指定 qemu 可执行文件。\n" + location.detail,
+            )
+            if (!location.executable) {
+                throw SessionException(
+                    "模拟核心存在但无法执行（系统拒绝 exec）。\n" + location.detail,
+                )
+            }
 
             paths.prepare()
             val keymaps = QemuLocator.keymapsDir(context, executable)
@@ -228,7 +234,12 @@ class SessionManager(
             builder.environment().apply {
                 put("TMPDIR", context.cacheDir.absolutePath)
                 put("HOME", context.filesDir.absolutePath)
-                put("LD_LIBRARY_PATH", context.applicationInfo.nativeLibraryDir ?: "")
+                // qemu 与它的依赖 .so 同目录；自定义路径时也要把那个目录带上
+                val libDirs = listOfNotNull(
+                    executable.parentFile?.absolutePath,
+                    context.applicationInfo.nativeLibraryDir,
+                ).distinct()
+                put("LD_LIBRARY_PATH", libDirs.joinToString(":"))
                 put("QEMU_AUDIO_DRV", "none")
             }
 
@@ -283,7 +294,14 @@ class SessionManager(
                 start()
             }
         } catch (error: Throwable) {
-            lastError = (error.message ?: error.javaClass.simpleName) + stdoutTail()
+            val message = error.message ?: error.javaClass.simpleName
+            val hint = if (QemuLocator.isPermissionDenied(error)) {
+                "\n提示：系统禁止从该路径执行二进制（EACCES）。qemu 必须由 APK 的 " +
+                    "jniLibs 提供（nativeLibraryDir），并允许解压原生库。"
+            } else {
+                ""
+            }
+            lastError = message + hint + stdoutTail()
             cleanupProcess()
             synchronized(stateLock) { state = SessionState.ERROR }
             notifyState()
@@ -402,16 +420,24 @@ class SessionManager(
         -1L
     }
 
+    /**
+     * qemu 的 stdout/stderr 尾巴（各取末 20 行）——启动失败时直接显示到界面，
+     * 真机联调时不接 adb 也能看到 qemu 自己报的错。
+     */
     private fun stdoutTail(): String {
-        val file = paths.stdoutLog
-        if (!file.isFile) return ""
-        return try {
-            val text = file.readText(Charsets.UTF_8)
-            val tail = text.takeLast(1600).trim()
-            if (tail.isEmpty()) "" else "\n--- qemu 输出（末尾） ---\n$tail"
-        } catch (error: Throwable) {
-            ""
+        val chunks = ArrayList<String>(2)
+        for (file in listOf(paths.stdoutLog, paths.qemuLog)) {
+            if (!file.isFile) continue
+            val text = try {
+                file.readText(Charsets.UTF_8)
+            } catch (error: Throwable) {
+                null
+            } ?: continue
+            val tail = QemuLocator.tail(text, 20)
+            if (tail.isNotBlank()) chunks.add("--- ${file.name}（末 20 行）---\n$tail")
         }
+        if (chunks.isEmpty()) return ""
+        return "\n" + chunks.joinToString("\n")
     }
 
     // ------------------------------------------------------------ 显示 / 控制台

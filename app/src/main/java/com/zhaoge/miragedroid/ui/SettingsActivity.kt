@@ -214,25 +214,30 @@ class SettingsActivity : Activity() {
     }
 
     private fun refreshCore() {
-        val executable = app.qemuExecutable()
+        val location = app.qemuLocation()
+        val executable = location.file
         if (executable == null) {
             coreStatus.text = "模拟核心：缺失"
             coreStatus.setTextColor(Ui.WARN)
-            coreDetail.text =
-                "当前 APK 没有 libqemu-system-arm.so。设备管理与固件导入可用，但无法启动模拟。" +
-                    "请安装含模拟核心的 CI 产物，或在设备设置里指定 qemu 路径。"
+            coreDetail.text = location.detail +
+                "\n\n设备管理与固件导入可用，但无法启动模拟。请安装含模拟核心的 APK（jniLibs）。"
+        } else if (!location.executable) {
+            coreStatus.text = "模拟核心：存在但不可执行"
+            coreStatus.setTextColor(Ui.ERROR)
+            coreDetail.text = location.detail +
+                "\n\n设备管理与固件导入可用；启动会失败。若 APK 已内置核心，" +
+                "请确认安装时解压了原生库（本 App 已开 useLegacyPackaging）。"
         } else {
             coreStatus.text = "模拟核心：可用"
             coreStatus.setTextColor(Ui.OK)
-            val detail = buildString {
-                append("路径：").append(executable.absolutePath)
+            coreDetail.text = buildString {
+                append(location.detail)
                 val size = executable.length()
                 if (size > 0) append("\n大小：").append(formatBytes(size))
                 val devicelib = NativeCore.version()
                 append("\ndevicelib：").append(if (devicelib.isNullOrEmpty()) "不可用" else devicelib)
                 append("\n设备库目录：").append(app.store.root.absolutePath)
             }
-            coreDetail.text = detail
         }
     }
 
@@ -244,15 +249,21 @@ class SettingsActivity : Activity() {
             return
         }
         Thread {
-            val version = QemuLocator.version(executable)
-            app.qemuVersion = version
+            // 真机自检：真正 exec 一次 qemu --version，失败时把 stderr 尾巴带回来
+            val info = QemuLocator.versionDetailed(executable, cacheDir)
+            app.qemuVersion = info.version
             app.qemuVersionChecked = true
             runOnUiThread {
                 if (isFinishing) return@runOnUiThread
-                coreVersion.text = if (version.isNullOrBlank()) {
-                    "qemu 版本：无法执行 --version（可能是依赖库缺失）"
-                } else {
-                    "qemu 版本：$version"
+                coreVersion.text = buildString {
+                    if (info.version.isNullOrBlank()) {
+                        append("qemu 版本：执行 --version 失败")
+                    } else {
+                        append("qemu 版本：").append(info.version)
+                    }
+                    if (!info.error.isNullOrBlank()) {
+                        append("\n").append(info.error)
+                    }
                 }
             }
         }.apply { name = "QemuVersionProbe" }.start()

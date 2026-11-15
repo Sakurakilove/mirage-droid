@@ -111,34 +111,41 @@ class HubActivity : Activity() {
         return root
     }
 
-    private fun environmentBanner(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = Ui.rounded(this@HubActivity, Ui.ACCENT_DIM, 14f, Ui.ACCENT, 1f)
-        val padding = Ui.dp(this@HubActivity, 14f)
-        setPadding(padding, padding, padding, padding)
-        val params = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-        params.topMargin = Ui.dp(this@HubActivity, 14f)
-        layoutParams = params
-        addView(Ui.text(this@HubActivity, "未检测到模拟核心", 14f, Ui.ACCENT, bold = true))
-        addView(
-            Ui.text(
-                this@HubActivity,
-                "当前 APK 不含 libqemu-system-arm.so，设备可以管理但无法启动。" +
-                    "请安装含模拟核心的构建（CI 的 qemu 产物打进来之后即可）。",
-                12.5f,
-                Ui.TEXT_DIM,
-            ).apply {
-                val p = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                )
-                p.topMargin = Ui.dp(this@HubActivity, 5f)
-                layoutParams = p
-            },
-        )
+    private fun environmentBanner(): View {
+        val location = app.qemuLocation()
+        val missing = location.file == null
+        val title = if (missing) "未检测到模拟核心" else "模拟核心无法执行"
+        val detail = when {
+            missing -> "当前 APK 不含 libqemu-system-arm.so，设备可以管理但无法启动。" +
+                "请安装含模拟核心的构建（CI 的 qemu 产物打进来之后即可）。"
+            !location.executable -> "找到 ${location.file?.name}，但系统拒绝执行：" +
+                "${location.file?.absolutePath}。可在「设置 → 模拟核心」查看自检详情。"
+            else -> ""
+        }
+        val accent = if (missing) Ui.ACCENT else Ui.ERROR
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.rounded(this@HubActivity, Ui.ACCENT_DIM, 14f, accent, 1f)
+            val padding = Ui.dp(this@HubActivity, 14f)
+            setPadding(padding, padding, padding, padding)
+            val params = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            params.topMargin = Ui.dp(this@HubActivity, 14f)
+            layoutParams = params
+            addView(Ui.text(this@HubActivity, title, 14f, accent, bold = true))
+            addView(
+                Ui.text(this@HubActivity, detail, 12.5f, Ui.TEXT_DIM).apply {
+                    val p = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                    p.topMargin = Ui.dp(this@HubActivity, 5f)
+                    layoutParams = p
+                },
+            )
+        }
     }
 
     // ------------------------------------------------------------ 设备列表
