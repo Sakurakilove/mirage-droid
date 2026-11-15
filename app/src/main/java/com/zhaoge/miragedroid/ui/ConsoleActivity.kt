@@ -52,6 +52,8 @@ class ConsoleActivity : Activity(), SessionListener {
         session = manager
         setContentView(buildContent())
         session.addListener(this)
+        // 首次 attach 可能比页面晚：进来时补一次重连
+        session.retryConsole()
         refresh()
     }
 

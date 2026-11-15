@@ -19,6 +19,11 @@ import android.widget.SeekBar
 import android.widget.TextView
 import com.zhaoge.miragedroid.MirageApp
 import com.zhaoge.miragedroid.data.DeviceProfile
+import com.zhaoge.miragedroid.data.Json
+import com.zhaoge.miragedroid.data.JsonValue
+import com.zhaoge.miragedroid.data.bool
+import com.zhaoge.miragedroid.data.field
+import com.zhaoge.miragedroid.data.str
 import com.zhaoge.miragedroid.data.DeviceProfiles
 import com.zhaoge.miragedroid.data.SessionState
 import com.zhaoge.miragedroid.data.VirtualDevice
@@ -173,6 +178,7 @@ class DeviceActivity : Activity(), SessionListener {
 
     private fun selectTab(index: Int) {
         currentTab = index
+        if (index == 1) session.retryConsole()
         for (child in 0 until tabBar.childCount) {
             val tab = tabBar.getChildAt(child) as TextView
             tab.setTextColor(if (child == index) Ui.ACCENT else Ui.TEXT_DIM)
@@ -593,6 +599,132 @@ class DeviceActivity : Activity(), SessionListener {
 
     // ------------------------------------------------------------ 表盘 tab
 
+    /** 读设备里的一个文件（NSH cat），能解析成应用列表时给摘要，否则显示原始输出。 */
+    private fun readDeviceFile(fileName: String) {
+        if (session.state != SessionState.RUNNING) {
+            Ui.toast(this, "设备未运行，先启动设备再读取")
+            return
+        }
+        Ui.toast(this, "正在读取 /data/quickapp/$fileName …")
+        session.runConsoleCommand("cat /data/quickapp/$fileName") { result ->
+            if (isFinishing) return@runConsoleCommand
+            val raw = result.output
+            if (raw.isNullOrBlank()) {
+                showTextDialog(
+                    "读取 $fileName",
+                    (result.error ?: "没有输出") + "\n\n命令：cat /data/quickapp/$fileName",
+                )
+                return@runConsoleCommand
+            }
+            val body = if (fileName.endsWith(".json")) summarizeAppsJson(raw) else null
+            val text = buildString {
+                if (body != null) {
+                    append(body).append("\n\n")
+                } else if (result.error != null) {
+                    append("说明：").append(result.error).append("\n\n")
+                }
+                append("--- 原始输出（最多显示 30000 字符）---\n")
+                append(raw.take(30000))
+            }
+            showTextDialog("设备文件：$fileName", text)
+        }
+    }
+
+    /** 从 apps.json 里提取应用数量与名字（容忍字段差异与日志干扰）。 */
+    private fun summarizeAppsJson(raw: String): String {
+        val text = raw.trim()
+        if (text.isEmpty()) return "输出为空"
+        val root = Json.parseOrNull(text)
+            ?: return "无法解析成 JSON（NSH 输出可能混进了日志），下面显示原始输出。"
+        val apps = if (root is JsonValue.Obj) {
+            (root.field("InstalledApps") as? JsonValue.Arr)
+        } else {
+            null
+        } ?: (root as? JsonValue.Arr)
+        ?: return "没有找到 InstalledApps 数组，下面显示原始输出。"
+        val items = apps.items
+        return buildString {
+            append("共 ").append(items.size).append(" 个应用")
+            var shown = 0
+            for (item in items) {
+                val obj = item as? JsonValue.Obj ?: continue
+                if (shown >= 200) {
+                    append("\n  …（只显示前 200 条）")
+                    break
+                }
+                val packageName = obj.str("package").ifEmpty { obj.str("pkg") }
+                val name = obj.str("appName")
+                    .ifEmpty { obj.str("label") }
+                    .ifEmpty { obj.str("name") }
+                val hidden = obj.bool("hideFlag")
+                append("\n  · ").append(if (name.isNotEmpty()) name else "(未命名)")
+                if (packageName.isNotEmpty()) append("  [").append(packageName).append("]")
+                if (hidden) append("  · 隐藏")
+                shown++
+            }
+        }
+    }
+
+    /** 手动执行一条 NSH 命令并展示结果（方便真机联调）。 */
+    private fun promptNshCommand() {
+        if (session.state != SessionState.RUNNING) {
+            Ui.toast(this, "设备未运行，先启动设备再执行命令")
+            return
+        }
+        val input = EditText(this).apply {
+            setText("ls /data/quickapp")
+            inputType = InputType.TYPE_CLASS_TEXT
+            setSelection(text.length)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("执行 NSH 命令")
+            .setView(input)
+            .setPositiveButton("执行") { _, _ ->
+                val command = input.text.toString().trim()
+                if (command.isEmpty()) return@setPositiveButton
+                session.runConsoleCommand(command) { result ->
+                    if (isFinishing) return@runConsoleCommand
+                    val text = buildString {
+                        if (result.error != null) append("说明：").append(result.error).append("\n\n")
+                        append(result.output?.take(30000) ?: "（无输出）")
+                    }
+                    showTextDialog("命令输出：$command", text)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 可滚动、可复制的长文本对话框（应用列表 / 命令输出）。 */
+    private fun showTextDialog(title: String, text: String) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Ui.dp(this@DeviceActivity, 420f),
+            )
+        }
+        val scroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            background = Ui.rounded(this@DeviceActivity, Ui.SURFACE_HIGH, 10f)
+        }
+        val content = Ui.text(this, text, 11.5f, Ui.TEXT, mono = true).apply {
+            setTextIsSelectable(true)
+            val padding = Ui.dp(this@DeviceActivity, 12f)
+            setPadding(padding, padding, padding, padding)
+        }
+        scroll.addView(content)
+        container.addView(scroll)
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(container)
+            .setPositiveButton("关闭", null)
+            .show()
+    }
+
     private fun buildWatchfaceTab(): View {
         val scroll = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -641,14 +773,12 @@ class DeviceActivity : Activity(), SessionListener {
             params.topMargin = Ui.dp(this@DeviceActivity, 12f)
             layoutParams = params
         }
-        manageCard.addView(Ui.text(this, "表盘管理", 16f, Ui.TEXT, bold = true))
+        manageCard.addView(Ui.text(this, "表盘 / 应用管理", 16f, Ui.TEXT, bold = true))
         manageCard.addView(
             Ui.text(
                 this,
-                "表盘管理（读取设备内的表盘列表、安装/删除第三方表盘）将在下一个里程碑接入：\n" +
-                    "  · 通过控制台读取 /data/quickapp/apps.json 与表盘资源\n" +
-                    "  · 通过 NSH 写入表盘包并触发系统刷新\n" +
-                    "当前版本可在「控制台」里手动执行 NSH 命令。",
+                "通过设备控制台（NSH）读取固件里的应用与表盘列表。当前版本支持只读查看；" +
+                    "安装/删除第三方表盘会在后续版本接入。",
                 12.5f,
                 Ui.TEXT_DIM,
             ).apply {
@@ -659,6 +789,24 @@ class DeviceActivity : Activity(), SessionListener {
                 params.topMargin = Ui.dp(this@DeviceActivity, 8f)
                 layoutParams = params
             },
+        )
+        manageCard.addView(Ui.spacer(this, 10f))
+        manageCard.addView(
+            Ui.button(this, "读取设备应用列表（apps.json）", primary = false) {
+                readDeviceFile("apps.json")
+            }.apply { layoutParams = fullWidthParams() },
+        )
+        manageCard.addView(Ui.spacer(this, 8f))
+        manageCard.addView(
+            Ui.button(this, "读取隐藏列表（apps.json_hide）", primary = false) {
+                readDeviceFile("apps.json_hide")
+            }.apply { layoutParams = fullWidthParams() },
+        )
+        manageCard.addView(Ui.spacer(this, 8f))
+        manageCard.addView(
+            Ui.button(this, "执行自定义 NSH 命令", primary = false) {
+                promptNshCommand()
+            }.apply { layoutParams = fullWidthParams() },
         )
         column.addView(manageCard)
 

@@ -11,6 +11,7 @@ import com.zhaoge.miragedroid.data.JsonValue
 import com.zhaoge.miragedroid.data.SessionState
 import com.zhaoge.miragedroid.data.VirtualDevice
 import com.zhaoge.miragedroid.net.NshClient
+import com.zhaoge.miragedroid.net.NshOutput
 import com.zhaoge.miragedroid.net.QmpClient
 import com.zhaoge.miragedroid.net.QmpCommands
 import com.zhaoge.miragedroid.net.RfbFrame
@@ -21,9 +22,20 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** 会话层错误（启动前的可读失败原因）。 */
 class SessionException(message: String) : Exception(message)
+
+/**
+ * 一条 NSH 命令的执行结果。
+ * [output] 是回显与下一个提示符之间的正文；超时/无提示符时可能是"命令后的原始输出"。
+ */
+data class ConsoleCommandResult(
+    val command: String,
+    val output: String?,
+    val error: String?,
+)
 
 /**
  * 一台设备的 QEMU 会话：进程生命周期 + QMP/VNC/控制台连接 + 输入注入。
@@ -59,6 +71,9 @@ class SessionManager(
 
     @Volatile
     private var lastTouchMoveAt = 0L
+
+    /** 同一时刻只允许一条 NSH 交互命令，避免回显/输出交错。 */
+    private val consoleCommandRunning = AtomicBoolean(false)
 
     @Volatile
     var state: SessionState = SessionState.STOPPED
@@ -492,6 +507,16 @@ class SessionManager(
         }
     }
 
+    /** 主动重连控制台（例如首次 attach 时 qemu 还没建好 socket）。 */
+    fun retryConsole() {
+        if (state != SessionState.RUNNING || nsh != null) return
+        consoleThread = Thread { attachConsole() }.apply {
+            name = "MirageConsoleRetry-$deviceId"
+            isDaemon = true
+            start()
+        }
+    }
+
     /** 主动重连屏幕（例如界面恢复时还没连上）。 */
     fun retryScreen() {
         if (state != SessionState.RUNNING || vnc != null) return
@@ -632,6 +657,85 @@ class SessionManager(
     /** 只清空本地回滚缓冲，不影响设备。 */
     fun consoleClearLocal() {
         nsh?.clearHistory()
+    }
+
+    /**
+     * 执行一条 NSH 命令并解析输出（用于"表盘管理"读取设备文件）。
+     *
+     * 做法：记下发送前的控制台历史 → 发送命令 → 等 [NshOutput.isComplete]（出现下一个提示符）。
+     * 设备若没有交互式 NSH（或提示符格式不认识），超时后把命令之后的原始输出返回并带上说明，
+     * 至少能看到文件内容。
+     *
+     * 结果回调在主线程；同一时刻只跑一条，重复调用会返回"上一条还在执行"。
+     */
+    fun runConsoleCommand(
+        command: String,
+        timeoutMs: Long = 6000L,
+        onResult: (ConsoleCommandResult) -> Unit,
+    ) {
+        val client = nsh
+        if (client == null) {
+            mainHandler.post {
+                onResult(
+                    ConsoleCommandResult(
+                        command,
+                        null,
+                        "控制台未连接。设备可能未运行，或该机型没有可交互的控制台；" +
+                            "可先到「控制台」tab 查看启动日志。",
+                    ),
+                )
+            }
+            return
+        }
+        if (!consoleCommandRunning.compareAndSet(false, true)) {
+            mainHandler.post { onResult(ConsoleCommandResult(command, null, "上一条命令还在执行，请稍候再试")) }
+            return
+        }
+        val baseline = client.historyText()
+        client.sendLine(command)
+        Thread {
+            var output: String? = null
+            var error: String? = null
+            try {
+                val deadline = System.currentTimeMillis() + timeoutMs
+                var latest = baseline
+                while (System.currentTimeMillis() < deadline) {
+                    latest = client.historyText()
+                    // 只看本次命令之后的输出，避免历史上同名命令的回显被当成新结果
+                    val window = if (latest.startsWith(baseline)) latest.substring(baseline.length) else latest
+                    if (NshOutput.isComplete(window, command)) {
+                        output = NshOutput.body(window, command)
+                        break
+                    }
+                    try {
+                        Thread.sleep(120)
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+                if (output == null) {
+                    val fresh = if (latest.startsWith(baseline)) latest.substring(baseline.length) else latest
+                    val text = NshOutput.strip(fresh).trim()
+                    if (text.isEmpty()) {
+                        error = "命令执行超时，控制台没有新输出（设备可能没有交互式 NSH）"
+                    } else {
+                        output = text
+                        error = "未识别到 NSH 提示符，以下为命令后的控制台原始输出（可能混有日志）"
+                    }
+                }
+            } catch (failure: Throwable) {
+                error = failure.message ?: failure.javaClass.simpleName
+            } finally {
+                consoleCommandRunning.set(false)
+            }
+            val result = ConsoleCommandResult(command, output, error)
+            mainHandler.post { onResult(result) }
+        }.apply {
+            name = "NshCommand-$deviceId"
+            isDaemon = true
+            start()
+        }
     }
 
     // ------------------------------------------------------------ 清理
