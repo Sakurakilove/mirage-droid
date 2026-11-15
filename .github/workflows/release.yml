@@ -1,0 +1,321 @@
+name: release
+
+# tag `v*` 触发：构建 APK →（仓库配置了发布签名 Secrets 就正式签名，否则回退 debug 签名）
+# → 打包源码快照 → 创建 GitHub Release。
+#
+# workflow_dispatch 用于演练/补发：
+#   - 只构建、不发布：dry_run=true（产物仍在 Actions → Artifacts）
+#   - 发布 tag 不存在时，会在本次构建提交上创建该 tag
+#
+# 发布签名 Secrets（都可选；四个齐全才走正式签名路径）：
+#   KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+#
+# 合规：Release 资产包含完整源码快照 + SOURCE-OFFER.md + LICENSE（AGPL-3.0 / GPL-2.0）。
+# 固件绝不进产物：本 workflow 不下载、不缓存、不上传任何固件文件。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 tag（例如 v0.1.0）'
+        required: true
+        type: string
+      dry_run:
+        description: '只构建并上传 artifact，不创建/更新 GitHub Release'
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: '创建为草稿 Release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: '标记为预发布'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GRADLE_VERSION: '8.10.2'
+
+jobs:
+  release:
+    name: 构建并发布 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # workflow_dispatch 输入；tag push 时为空字符串
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+      DRAFT: ${{ github.event.inputs.draft }}
+      PRERELEASE: ${{ github.event.inputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要完整历史以归档 tag 对应的源码快照，并解析 submodule 指针
+          fetch-depth: 0
+          submodules: false
+
+      - name: 解析发布参数
+        id: meta
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            raw='${{ github.event.inputs.tag }}'
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          # 允许 "v1.2.3" 或 "1.2.3"
+          version="${raw#v}"
+          if [ -z "$version" ]; then
+            echo "::error::发布 tag 为空（workflow_dispatch 必须填 tag 输入）"
+            exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9][0-9A-Za-z._+-]*$'; then
+            echo "::error::tag 格式非法: ${raw}（期望 v1.2.3 形式）"
+            exit 1
+          fi
+
+          signed="false"
+          build_type="debug"
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            signed="true"
+            build_type="release"
+          fi
+
+          commit="$(git rev-parse --short HEAD)"
+          date_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          qemu_commit="$(git ls-tree HEAD core/qemu 2>/dev/null | awk '$1=="160000"{print $3; exit}' || true)"
+          if [ -z "$qemu_commit" ]; then
+            qemu_commit="unset"
+          fi
+
+          {
+            echo "tag=v${version}"
+            echo "version=${version}"
+            echo "signed=${signed}"
+            echo "build_type=${build_type}"
+            echo "commit=${commit}"
+            echo "date_utc=${date_utc}"
+            echo "qemu_commit=${qemu_commit}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "发布 tag=v${version} | 构建类型=${build_type} | commit=${commit} | qemu-miwear=${qemu_commit}"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Android SDK 环境
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
+          ls "$SDK/platforms" 2>/dev/null || true
+          ls "$SDK/build-tools" 2>/dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: 构建 debug APK（未配置发布签名 Secrets，回退 debug 签名）
+        if: steps.meta.outputs.signed != 'true'
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: 构建 release APK（未签名，下一步用 Secrets 签名）
+        if: steps.meta.outputs.signed == 'true'
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: 收集 APK
+        id: apk
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          build_type='${{ steps.meta.outputs.build_type }}'
+          apk_dir="app/build/outputs/apk/${build_type}"
+          if [ ! -d "$apk_dir" ]; then
+            echo "::error::APK 输出目录不存在: ${apk_dir}"
+            find app/build/outputs -maxdepth 4 -type f 2>/dev/null | sort || true
+            exit 1
+          fi
+          mapfile -t candidates < <(find "$apk_dir" -maxdepth 1 -type f -name '*.apk' | sort)
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::未找到 APK: ${apk_dir}"
+            exit 1
+          fi
+          src="${candidates[0]}"
+          # 正式签名路径优先取未签名产物，交给 apksigner 处理
+          for candidate in "${candidates[@]}"; do
+            case "$candidate" in
+              *-unsigned.apk) src="$candidate" ;;
+            esac
+          done
+          out="dist/mirage-droid-${{ steps.meta.outputs.version }}.apk"
+          cp "$src" "$out"
+          ls -lh "$out"
+          echo "path=${out}" >> "$GITHUB_OUTPUT"
+          echo "source=${src}" >> "$GITHUB_OUTPUT"
+
+      - name: 解码发布签名 keystore
+        if: steps.meta.outputs.signed == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          test -s "$RUNNER_TEMP/release.keystore"
+
+      - name: zipalign + apksigner 签名并自检
+        if: steps.meta.outputs.signed == 'true'
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: bash scripts/release/sign-apk.sh "${{ steps.apk.outputs.path }}"
+
+      - name: 生成源码快照（AGPL-3.0 合规）
+        id: source
+        run: |
+          set -euo pipefail
+          version='${{ steps.meta.outputs.version }}'
+          tarball="dist/mirage-droid-${version}-source.tar.gz"
+          git archive --format=tar.gz --prefix="mirage-droid-${version}/" -o "$tarball" HEAD
+          ls -lh "$tarball"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+
+      - name: 生成构建信息与 SHA256SUMS
+        id: dist
+        run: |
+          set -euo pipefail
+          version='${{ steps.meta.outputs.version }}'
+          apk="dist/mirage-droid-${version}.apk"
+          tarball="dist/mirage-droid-${version}-source.tar.gz"
+          size="$(du -h "$apk" | cut -f1)"
+          sha="$(sha256sum "$apk" | cut -d ' ' -f1)"
+          cp LICENSE dist/LICENSE
+          {
+            echo "项目: MirageDroid"
+            echo "tag: ${{ steps.meta.outputs.tag }}"
+            echo "版本: ${version}"
+            echo "构建类型: ${{ steps.meta.outputs.build_type }}"
+            echo "发布签名: ${{ steps.meta.outputs.signed }}"
+            echo "提交: ${{ steps.meta.outputs.commit }}"
+            echo "构建时间(UTC): ${{ steps.meta.outputs.date_utc }}"
+            echo "qemu-miwear submodule: ${{ steps.meta.outputs.qemu_commit }}"
+            echo "仓库: https://github.com/${{ github.repository }}"
+            echo "CI 运行: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "JDK: $(java -version 2>&1 | head -n1)"
+            echo "Gradle: ${GRADLE_VERSION:-unknown}"
+            echo "APK: $(basename "$apk") (${size})"
+            echo "APK sha256: ${sha}"
+            echo "源码快照: $(basename "$tarball")"
+            echo "固件: 不包含（本仓库不分发小米固件）"
+          } > dist/BUILD-INFO.txt
+          (
+            cd dist
+            sha256sum "$(basename "$apk")" "$(basename "$tarball")" > SHA256SUMS
+          )
+          cat dist/BUILD-INFO.txt
+          echo "apk_size=${size}" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: 生成 Release notes 与合规声明
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SIGNED: ${{ steps.meta.outputs.signed }}
+          BUILD_TYPE: ${{ steps.meta.outputs.build_type }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          QEMU_COMMIT: ${{ steps.meta.outputs.qemu_commit }}
+          APK_NAME: ${{ format('mirage-droid-{0}.apk', steps.meta.outputs.version) }}
+          APK_SIZE: ${{ steps.dist.outputs.apk_size }}
+          APK_SHA256: ${{ steps.dist.outputs.apk_sha256 }}
+          SOURCE_TARBALL: ${{ format('mirage-droid-{0}-source.tar.gz', steps.meta.outputs.version) }}
+          REPO: ${{ github.repository }}
+          REF: ${{ steps.meta.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/release-notes.sh > dist/RELEASE_NOTES.md
+          bash scripts/release/make-source-offer.sh > dist/SOURCE-OFFER.md
+          echo "--- RELEASE_NOTES.md 预览 ---"
+          head -n 40 dist/RELEASE_NOTES.md
+
+      - name: 上传构建产物（artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirage-droid-${{ steps.meta.outputs.version }}
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 写入运行摘要
+        run: |
+          {
+            echo "## MirageDroid ${{ steps.meta.outputs.tag }}"
+            echo ""
+            echo "- 构建类型：\`${{ steps.meta.outputs.build_type }}\`（发布签名：${{ steps.meta.outputs.signed }}）"
+            echo "- 提交：\`${{ steps.meta.outputs.commit }}\`"
+            echo "- qemu-miwear submodule：\`${{ steps.meta.outputs.qemu_commit }}\`"
+            echo "- APK：\`mirage-droid-${{ steps.meta.outputs.version }}.apk\`（${{ steps.dist.outputs.apk_size }}，sha256 \`${{ steps.dist.outputs.apk_sha256 }}\`）"
+            echo "- 源码快照：\`mirage-droid-${{ steps.meta.outputs.version }}-source.tar.gz\`"
+            echo ""
+            echo "> 固件未包含在本构建产物中；固件需用户自行合法获取并在 App 内导入。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 创建 / 更新 GitHub Release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.meta.outputs.tag }}'
+          version='${{ steps.meta.outputs.version }}'
+          files=(
+            "dist/mirage-droid-${version}.apk"
+            "dist/mirage-droid-${version}-source.tar.gz"
+            "dist/SHA256SUMS"
+            "dist/SOURCE-OFFER.md"
+            "dist/LICENSE"
+            "dist/BUILD-INFO.txt"
+          )
+          extra=()
+          if [ "${DRAFT}" = "true" ]; then extra+=(--draft); fi
+          if [ "${PRERELEASE}" = "true" ]; then extra+=(--prerelease); fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${tag} 已存在：覆盖上传资产并更新说明"
+            gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "MirageDroid ${tag}" \
+              --notes-file dist/RELEASE_NOTES.md \
+              "${extra[@]}"
+          else
+            echo "创建 Release ${tag}"
+            gh release create "$tag" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "MirageDroid ${tag}" \
+              --notes-file dist/RELEASE_NOTES.md \
+              "${extra[@]}"
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url,isDraft,isPrerelease,assets \
+            --jq '"发布地址: " + .url + " | draft=" + (.isDraft|tostring) + " | prerelease=" + (.isPrerelease|tostring) + " | assets=" + ([.assets[].name] | join(","))'

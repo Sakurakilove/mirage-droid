@@ -1,0 +1,193 @@
+name: host-tests
+
+# 纯宿主侧（Ubuntu）测试：不依赖 Android SDK / NDK / QEMU 交叉编译。
+# - JVM 单元测试：gradle :app:testDebugUnitTest（Kotlin/Java 逻辑层）
+# - devicelib：tools/build_devlib.sh（gcc）构建 + 单测（脚本未合入时明确跳过）
+# - 校验：workflow YAML 结构 + actionlint；Python 语法/关键规则 lint
+#
+# 与 android.yml 的分工：android.yml 负责“能出 APK”，本 workflow 负责“逻辑与脚本正确”。
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - 'core/**'
+      - 'tools/**'
+      - 'scripts/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'core/**'
+      - 'tools/**'
+      - 'scripts/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '8.10.2'
+  PYTHON_VERSION: '3.12'
+  ACTIONLINT_VERSION: '1.7.12'
+  # actionlint_1.7.12_linux_amd64.tar.gz 的 SHA-256（官方 release 资产）
+  ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+
+jobs:
+  workflow-lint:
+    name: workflow YAML 校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装 PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: 结构校验（PyYAML，脚本级）
+        run: python3 scripts/release/validate_workflows.py
+
+      - name: actionlint（官方静态分析）
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/actionlint-bin" actionlint
+          "$RUNNER_TEMP/actionlint-bin/actionlint" -color -verbose
+
+  jvm-unit:
+    name: JVM 单测（Gradle）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Android SDK 环境
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
+          ls "$SDK/platforms" 2>/dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          # setup-gradle 自带 build 缓存与 dependency 缓存，跨 run 复用
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: 纯 JVM 单测
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: 上传 JUnit 报告（失败定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: |
+            app/build/test-results/testDebugUnitTest/**/*.xml
+            app/build/reports/tests/testDebugUnitTest/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  host-devicelib:
+    name: 宿主 devicelib（gcc）构建与单测
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装构建与 lint 工具
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config zlib1g-dev
+          python3 -m pip install --quiet pyyaml ruff
+
+      - name: Python 语法与关键规则 lint
+        run: |
+          set -euo pipefail
+          # 排除第三方/QEMU 源码树，避免 lint 跑进 submodule
+          mapfile -t py_files < <(
+            find tools scripts core -name '*.py' -type f \
+              -not -path 'core/qemu/*' -not -path 'core/3rdparty/*' -not -path 'core/littlefs/*' \
+              2>/dev/null | sort || true
+          )
+          if [ "${#py_files[@]}" -eq 0 ]; then
+            echo "::notice::tools/ scripts/ core/ 下暂未发现 Python 文件，跳过 Python lint"
+            exit 0
+          fi
+          echo "发现 ${#py_files[@]} 个 Python 文件"
+          python3 -m compileall -q "${py_files[@]}"
+          # 只开“一定是 bug”的规则，避免把风格问题变成红灯
+          python3 -m ruff check --no-cache --select E9,F63,F7,F82 "${py_files[@]}"
+
+      - name: devicelib 宿主构建
+        id: devlib-build
+        run: |
+          set -euo pipefail
+          if [ ! -f tools/build_devlib.sh ]; then
+            echo "::warning file=tools/build_devlib.sh::devicelib 宿主构建脚本尚未合入（devicecore 负责），本次跳过宿主构建与单测"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          bash tools/build_devlib.sh 2>&1 | tee "$RUNNER_TEMP/devlib-build.log"
+
+      - name: devicelib 单测
+        if: steps.devlib-build.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          if [ -f tools/test_devlib.py ]; then
+            python3 tools/test_devlib.py 2>&1 | tee "$RUNNER_TEMP/devlib-test.log"
+          elif [ -f tools/test_devlib.sh ]; then
+            bash tools/test_devlib.sh 2>&1 | tee "$RUNNER_TEMP/devlib-test.log"
+          else
+            echo "::warning file=tools/test_devlib.py::devicelib 单测脚本尚未合入，只完成构建；合入后本步骤自动执行"
+          fi
+
+      - name: 上传 devicelib 构建/测试日志（失败定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devicelib-logs
+          path: |
+            ${{ runner.temp }}/devlib-build.log
+            ${{ runner.temp }}/devlib-test.log
+          if-no-files-found: ignore
+          retention-days: 7
