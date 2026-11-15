@@ -230,7 +230,7 @@ for i in range(phnum):
     if struct.unpack_from('<I', d, o)[0] != 1:      # PT_LOAD
         continue
     off, vaddr = struct.unpack_from('<QQ', d, o + 8)
-    align = struct.unpack_from('<Q', d, o + 40)[0]
+    align = struct.unpack_from('<Q', d, o + 48)[0]
     if align and (vaddr - off) & (align - 1):
         print(f"{path}: PT_LOAD offset={off:#x} vaddr={vaddr:#x} align={align:#x}")
         sys.exit(1)
