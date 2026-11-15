@@ -1,0 +1,29 @@
+# Gradle / Android
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 原生构建
+core/qemu/            # git submodule（见 .gitmodules）
+core/3rdparty/
+core/build/
+out/
+dist/
+
+# 固件与设备数据（绝不可入库）
+*.bin
+*.rpk
+*.zip
+firmware/
+fixtures/
+!gradle/wrapper/gradle-wrapper.jar
+
+# 本机资料
+research/
+*.apk
+*.aab
