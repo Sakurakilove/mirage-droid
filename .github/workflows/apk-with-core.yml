@@ -1,0 +1,366 @@
+name: apk-with-core
+
+# 把 qemu-android（NDK 交叉编译）产出的模拟核心塞进 APK，产出**能真开机**的 debug APK。
+# 这是“能真开机”交付到用户手机的唯一通道；普通空壳 APK 走 android.yml。
+#
+# 触发：
+#  - qemu-android 成功完成后自动跑（workflow_run）
+#  - 手动 workflow_dispatch：可指定 qemu-android 的 run_id；留空则取最近一次成功的 run
+#  - push 到 main（可选）：取最近一次成功的 qemu-android artifact 打包；没有则告警跳过
+#
+# 产物：Artifact `mirage-droid-core-debug`（APK + BUILD-INFO.txt + SHA256SUMS）。
+# 构建期生成物（不入库，已在 .gitignore）：
+#   app/src/main/jniLibs/arm64-v8a/*.so
+#   app/src/main/assets/qemu/pc-bios/keymaps/**
+
+on:
+  workflow_run:
+    workflows: [qemu-android]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'qemu-android run id（留空 = 最近一次成功 run）'
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/apk-with-core.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: apk-with-core-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '8.10.2'
+  QEMU_WORKFLOW_FILE: qemu-android.yml
+  QEMU_ARTIFACT_NAME: qemu-android-arm64
+  # 主程序合理大小下限（字节）：Android arm64 的 qemu-system-arm 一般 > 5 MiB；
+  # 低于该值说明 artifact 解包/布局不对，直接 fail。
+  MAIN_SO_MIN_BYTES: '1048576'
+
+jobs:
+  package:
+    name: 打包带模拟核心的 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 解析 qemu-android run
+        id: qemu-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RUN_ID: ${{ github.event.inputs.run_id }}
+          WF_RUN_ID: ${{ github.event.workflow_run.id }}
+          WF_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+          skip() {
+            echo "::warning title=跳过带核心 APK::$1"
+            {
+              echo "## 跳过：带核心 APK 未构建"
+              echo ""
+              echo "$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          run_id=""
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            if [ "${WF_RUN_CONCLUSION}" != "success" ]; then
+              skip "触发的 qemu-android run ${WF_RUN_ID} 结论为 ${WF_RUN_CONCLUSION}，不打包"
+            fi
+            run_id="${WF_RUN_ID}"
+          elif [ -n "${INPUT_RUN_ID:-}" ]; then
+            run_id="${INPUT_RUN_ID}"
+          else
+            # push / 未指定 run_id 的手动触发：取最近一次成功的 qemu-android run
+            run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${QEMU_WORKFLOW_FILE}/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)"
+            if [ -z "$run_id" ]; then
+              skip "仓库里还没有成功的 qemu-android run（先让 qemu-android 绿）"
+            fi
+          fi
+
+          # 校验 run 元数据：必须是 qemu-android 且成功
+          meta="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+            --jq '[.id, .name, .head_sha, .conclusion, .html_url] | @tsv')"
+          IFS=$'\t' read -r rid rname rsha rconclusion rurl <<< "$meta"
+          if [ "$rname" != "qemu-android" ]; then
+            echo "::error title=run 不匹配::run ${run_id} 属于 workflow '${rname}'，需要 qemu-android"
+            exit 1
+          fi
+          if [ "$rconclusion" != "success" ]; then
+            echo "::error title=qemu run 未成功::run ${run_id} 结论为 ${rconclusion}"
+            exit 1
+          fi
+
+          echo "使用 qemu-android run ${rid}（commit ${rsha}）"
+          {
+            echo "skip=false"
+            echo "run_id=${rid}"
+            echo "run_sha=${rsha}"
+            echo "run_url=${rurl}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout（与 qemu artifact 同一 commit）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.qemu-run.outputs.run_sha || 'main' }}
+          submodules: false
+
+      - name: 下载 qemu-android artifact
+        if: steps.qemu-run.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.QEMU_ARTIFACT_NAME }}
+          run-id: ${{ steps.qemu-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qemu-artifact
+
+      - name: 解包、校验产物布局并注入 jniLibs/assets
+        if: steps.qemu-run.outputs.skip != 'true'
+        id: stage
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends binutils file unzip
+
+          art="$RUNNER_TEMP/qemu-artifact"
+          work="$RUNNER_TEMP/qemu-unpacked"
+          rm -rf "$work"
+          mkdir -p "$work"
+
+          tarball="$(find "$art" -maxdepth 3 -type f -name 'qemu-android-arm64.tar.gz' -print -quit)"
+          if [ -z "$tarball" ]; then
+            echo "::error title=缺少 artifact::下载的 artifact 里没有 qemu-android-arm64.tar.gz"
+            find "$art" -maxdepth 3 -type f | sort | head -n 40 || true
+            exit 1
+          fi
+          tar -xzf "$tarball" -C "$work"
+
+          # 兼容顶层带目录的打包方式：找含 lib/ 的包根
+          root="$work"
+          if [ ! -d "$root/lib" ]; then
+            libdir="$(find "$work" -maxdepth 3 -type d -name lib -print -quit)"
+            if [ -n "$libdir" ]; then
+              root="$(dirname "$libdir")"
+            fi
+          fi
+
+          main_so="$root/lib/libqemu-system-arm.so"
+          if [ ! -f "$main_so" ]; then
+            echo "::error title=缺少主程序::产物里没有 lib/libqemu-system-arm.so"
+            find "$work" -maxdepth 4 -type f | sort | head -n 40 || true
+            exit 1
+          fi
+
+          mapfile -t sos < <(find "$root/lib" -maxdepth 1 -type f -name '*.so' | sort)
+          echo "发现 ${#sos[@]} 个 .so"
+          if [ "${#sos[@]}" -lt 2 ]; then
+            echo "::error title=依赖库缺失::lib/ 下只有 ${#sos[@]} 个 .so（至少需要主程序 + 依赖）"
+            exit 1
+          fi
+
+          main_size="$(stat -c %s "$main_so")"
+          echo "libqemu-system-arm.so: ${main_size} bytes"
+          if [ "$main_size" -lt "$MAIN_SO_MIN_BYTES" ]; then
+            echo "::error title=主程序过小::libqemu-system-arm.so 只有 ${main_size} B（阈值 ${MAIN_SO_MIN_BYTES}），产物不对"
+            exit 1
+          fi
+
+          # --- 静态检查（等价复用 scripts/ci/verify-android-artifact.sh 的可检查项；
+          #     该脚本需要 NDK 的 llvm-readelf，本 job 不装 NDK，故用系统 binutils 复刻核心断言）---
+          if ! readelf -h "$main_so" | grep -q 'Machine:.*AArch64'; then
+            echo "::error title=架构不对::libqemu-system-arm.so 不是 AArch64 ELF"
+            readelf -h "$main_so" | head -n 20 || true
+            exit 1
+          fi
+          if ! readelf -l "$main_so" | grep -q 'interpreter: /system/bin/linker64'; then
+            echo "::error title=不是 bionic 程序::主程序 ELF interpreter 不是 /system/bin/linker64"
+            readelf -l "$main_so" | grep interpreter || true
+            exit 1
+          fi
+          if ! grep -aq 'Board profiles' "$main_so"; then
+            echo "::error title=缺少板级列表::主程序里没有 'Board profiles'（-M miwear,profile=help 的表）"
+            exit 1
+          fi
+
+          glibc_bad=""
+          for f in "$root"/lib/*.so; do
+            if readelf -d "$f" 2>/dev/null | grep -Eq 'libc\.so\.6|ld-linux|libpthread\.so\.0|librt\.so\.1'; then
+              glibc_bad="$glibc_bad $(basename "$f")"
+            fi
+          done
+          if [ -n "$glibc_bad" ]; then
+            echo "::error title=含 glibc 依赖::以下文件链接了 glibc：${glibc_bad}"
+            exit 1
+          fi
+
+          # NEEDED 闭包：非 platform 库必须在 bundle 内；缺失仅告警（qemu-android 的
+          # verify-android-artifact.sh 会用 NDK sysroot 做权威判断）
+          missing=""
+          for f in "$root"/lib/*.so; do
+            while IFS= read -r need; do
+              [ -z "$need" ] && continue
+              case "$need" in
+                libc.so|libm.so|libdl.so|liblog.so|libandroid.so|libz.so|libstdc++.so|libc++_shared.so) continue ;;
+              esac
+              [ -e "$root/lib/$need" ] || missing="$missing $(basename "$f")->$need"
+            done < <(readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning title=NEEDED 闭包可能不完整::${missing}"
+          fi
+
+          # --- 注入 jniLibs ---
+          jni="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          rm -rf "$GITHUB_WORKSPACE/app/src/main/jniLibs"
+          mkdir -p "$jni"
+          cp -f "$root/lib/"*.so "$jni/"
+          echo "jniLibs: $(find "$jni" -maxdepth 1 -name '*.so' | wc -l) 个 .so"
+
+          # --- 注入 assets（QemuAssets 解压后作为 qemu 的 -L 目录）---
+          keymaps="$root/share/qemu/keymaps"
+          assets="$GITHUB_WORKSPACE/app/src/main/assets/qemu/pc-bios"
+          if [ -d "$keymaps" ] && [ -f "$keymaps/en-us" ]; then
+            rm -rf "$GITHUB_WORKSPACE/app/src/main/assets/qemu"
+            mkdir -p "$assets"
+            cp -R "$keymaps" "$assets/keymaps"
+            echo "keymaps: $(find "$assets/keymaps" -type f | wc -l) 个文件"
+            echo "keymaps=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=缺 keymaps::qemu 产物里没有 share/qemu/keymaps/en-us；APK 将不含 keymaps（VNC 键盘可能不可用，不影响启动）"
+            echo "keymaps=missing" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "root=$root"
+            echo "so_count=${#sos[@]}"
+            echo "main_so_size=${main_size}"
+            echo "tarball=$tarball"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
+        if: steps.qemu-run.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Android SDK 环境
+        if: steps.qemu-run.outputs.skip != 'true'
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
+          ls "$SDK/platforms" 2>/dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.qemu-run.outputs.skip != 'true'
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: 构建带核心的 debug APK
+        if: steps.qemu-run.outputs.skip != 'true'
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: 校验 APK 内容并生成 BUILD-INFO
+        if: steps.qemu-run.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          src_apk="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          if [ -z "$src_apk" ]; then
+            echo "::error title=没有 APK::assembleDebug 未产出 APK"
+            exit 1
+          fi
+          mkdir -p dist
+          apk="dist/mirage-droid-core-debug.apk"
+          cp "$src_apk" "$apk"
+
+          unzip -l "$apk" > "$RUNNER_TEMP/apk-entries.txt"
+          if ! grep -q 'lib/arm64-v8a/libqemu-system-arm.so' "$RUNNER_TEMP/apk-entries.txt"; then
+            echo "::error title=APK 缺主程序::APK 内没有 lib/arm64-v8a/libqemu-system-arm.so"
+            grep 'lib/' "$RUNNER_TEMP/apk-entries.txt" | head -n 20 || true
+            exit 1
+          fi
+          apk_main_size="$(awk '/lib\/arm64-v8a\/libqemu-system-arm\.so$/{print $1}' "$RUNNER_TEMP/apk-entries.txt" | head -n1)"
+          echo "APK 内 libqemu-system-arm.so: ${apk_main_size} bytes"
+          if [ "${apk_main_size:-0}" -lt "$MAIN_SO_MIN_BYTES" ]; then
+            echo "::error title=APK 内主程序过小::${apk_main_size} B < ${MAIN_SO_MIN_BYTES}"
+            exit 1
+          fi
+          apk_so_count="$(grep -cE 'lib/arm64-v8a/lib[^/]*\.so$' "$RUNNER_TEMP/apk-entries.txt" || true)"
+          echo "APK 内 arm64-v8a .so 数量: ${apk_so_count}"
+          expected_so_count="${{ steps.stage.outputs.so_count }}"
+          if [ "$apk_so_count" -lt "$expected_so_count" ]; then
+            echo "::error title=APK 内 .so 不完整::期望 ${expected_so_count} 个，实际 ${apk_so_count}"
+            exit 1
+          fi
+          keymaps_mode="${{ steps.stage.outputs.keymaps }}"
+          if [ "$keymaps_mode" = "present" ]; then
+            if ! grep -q 'assets/qemu/pc-bios/keymaps/en-us' "$RUNNER_TEMP/apk-entries.txt"; then
+              echo "::error title=APK 缺 keymaps::assets/qemu/pc-bios/keymaps/en-us 不在 APK 内"
+              exit 1
+            fi
+          fi
+
+          apk_size="$(stat -c %s "$apk")"
+          apk_sha="$(sha256sum "$apk" | cut -d' ' -f1)"
+          qemu_tar_sha="$(sha256sum "${{ steps.stage.outputs.tarball }}" | cut -d' ' -f1)"
+          {
+            echo "项目: MirageDroid（带模拟核心 / 可开机）"
+            echo "APK: $(basename "$apk") (${apk_size} bytes)"
+            echo "APK sha256: ${apk_sha}"
+            echo "App commit: ${GITHUB_SHA}"
+            echo "qemu-android run: ${{ steps.qemu-run.outputs.run_id }} (${{ steps.qemu-run.outputs.run_sha }})"
+            echo "qemu-android run URL: ${{ steps.qemu-run.outputs.run_url }}"
+            echo "qemu artifact sha256: ${qemu_tar_sha}"
+            echo "jniLibs .so 数量: ${{ steps.stage.outputs.so_count }}"
+            echo "libqemu-system-arm.so 大小: ${{ steps.stage.outputs.main_so_size }} bytes"
+            echo "keymaps: ${{ steps.stage.outputs.keymaps }}"
+            echo "构建时间(UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "JDK: $(java -version 2>&1 | head -n1)"
+            echo "Gradle: ${GRADLE_VERSION:-unknown}"
+            echo "说明: 固件不包含在本产物中；用户需自行导入固件。"
+          } > dist/BUILD-INFO.txt
+          (
+            cd dist
+            sha256sum mirage-droid-core-debug.apk > SHA256SUMS
+          )
+          cat dist/BUILD-INFO.txt
+
+      - name: 上传带核心 APK
+        if: steps.qemu-run.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirage-droid-core-debug
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 写入运行摘要
+        if: steps.qemu-run.outputs.skip != 'true'
+        run: |
+          {
+            echo "## 带核心 APK（可真开机）"
+            echo ""
+            echo "- qemu-android run：[${{ steps.qemu-run.outputs.run_id }}](${{ steps.qemu-run.outputs.run_url }})（commit \`${{ steps.qemu-run.outputs.run_sha }}\`）"
+            echo "- App commit：\`${GITHUB_SHA}\`"
+            echo "- 产物：Artifact \`mirage-droid-core-debug\`（APK + BUILD-INFO + SHA256SUMS）"
+            echo "- jniLibs .so：${{ steps.stage.outputs.so_count }} 个；keymaps：${{ steps.stage.outputs.keymaps }}"
+            echo ""
+            echo "> 固件未包含；用户自行导入。"
+          } >> "$GITHUB_STEP_SUMMARY"

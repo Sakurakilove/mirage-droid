@@ -75,7 +75,24 @@ cd "$BUILD"
     --disable-capstone \
     --disable-curl \
     --disable-libssh \
-    --disable-glusterfs \
+    --disable-linux-aio \
+    --disable-l2tpv3 \
+    --disable-netmap \
+    --disable-vde \
+    --disable-af-xdp \
+    --disable-libiscsi \
+    --disable-libnfs \
+    --disable-libcbor \
+    --disable-fuse \
+    --disable-fuse-lseek \
+    --disable-multiprocess \
+    --disable-replication \
+    --disable-canokey \
+    --disable-rbd \
+    --disable-keyring \
+    --disable-vhost-crypto \
+    --disable-vhost-kernel \
+    --disable-vhost-net \
     --disable-rdma \
     --disable-curses \
     --disable-vnc-jpeg \
