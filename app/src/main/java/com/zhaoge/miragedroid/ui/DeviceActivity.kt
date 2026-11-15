@@ -18,12 +18,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import com.zhaoge.miragedroid.MirageApp
+import com.zhaoge.miragedroid.data.AppListParser
 import com.zhaoge.miragedroid.data.DeviceProfile
-import com.zhaoge.miragedroid.data.Json
-import com.zhaoge.miragedroid.data.JsonValue
-import com.zhaoge.miragedroid.data.bool
-import com.zhaoge.miragedroid.data.field
-import com.zhaoge.miragedroid.data.str
 import com.zhaoge.miragedroid.data.DeviceProfiles
 import com.zhaoge.miragedroid.data.SessionState
 import com.zhaoge.miragedroid.data.VirtualDevice
@@ -630,37 +626,20 @@ class DeviceActivity : Activity(), SessionListener {
         }
     }
 
-    /** 从 apps.json 里提取应用数量与名字（容忍字段差异与日志干扰）。 */
+    /** 应用列表摘要（解析逻辑在 data/AppListParser，有 JVM 单测）。 */
     private fun summarizeAppsJson(raw: String): String {
-        val text = raw.trim()
-        if (text.isEmpty()) return "输出为空"
-        val root = Json.parseOrNull(text)
-            ?: return "无法解析成 JSON（NSH 输出可能混进了日志），下面显示原始输出。"
-        val apps = if (root is JsonValue.Obj) {
-            (root.field("InstalledApps") as? JsonValue.Arr)
-        } else {
-            null
-        } ?: (root as? JsonValue.Arr)
-        ?: return "没有找到 InstalledApps 数组，下面显示原始输出。"
-        val items = apps.items
+        val list = AppListParser.parse(raw)
+            ?: return "无法解析应用列表 JSON（NSH 输出可能混入日志），下面显示原始输出。"
         return buildString {
-            append("共 ").append(items.size).append(" 个应用")
-            var shown = 0
-            for (item in items) {
-                val obj = item as? JsonValue.Obj ?: continue
-                if (shown >= 200) {
+            append("共 ").append(list.count).append(" 个应用")
+            for ((index, app) in list.entries.withIndex()) {
+                if (index >= 200) {
                     append("\n  …（只显示前 200 条）")
                     break
                 }
-                val packageName = obj.str("package").ifEmpty { obj.str("pkg") }
-                val name = obj.str("appName")
-                    .ifEmpty { obj.str("label") }
-                    .ifEmpty { obj.str("name") }
-                val hidden = obj.bool("hideFlag")
-                append("\n  · ").append(if (name.isNotEmpty()) name else "(未命名)")
-                if (packageName.isNotEmpty()) append("  [").append(packageName).append("]")
-                if (hidden) append("  · 隐藏")
-                shown++
+                append("\n  · ").append(app.displayName)
+                if (app.packageName.isNotEmpty()) append("  [").append(app.packageName).append("]")
+                if (app.hidden) append("  · 隐藏")
             }
         }
     }
