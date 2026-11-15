@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -108,6 +109,41 @@ class ConsoleActivity : Activity(), SessionListener {
         consoleView = Ui.text(this, "", 11.5f, 0xFFB7C4CF.toInt(), mono = true)
         scroll.addView(consoleView)
         root.addView(scroll)
+
+        val quickScroll = HorizontalScrollView(this).apply {
+            val params = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            params.topMargin = Ui.dp(this@ConsoleActivity, 8f)
+            layoutParams = params
+            isHorizontalScrollBarEnabled = false
+        }
+        val quickRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        quickRow.addView(Ui.text(this, "常用：", 12f, Ui.TEXT_DIM))
+        for (command in listOf("help", "ps", "ls /data/quickapp", "free")) {
+            quickRow.addView(
+                Ui.smallButton(this, command) {
+                    if (session.state != SessionState.RUNNING) {
+                        Ui.toast(this, "设备未运行，无法发送命令")
+                    } else {
+                        session.consoleSend(command)
+                    }
+                }.apply {
+                    val params = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                    params.marginEnd = Ui.dp(this@ConsoleActivity, 6f)
+                    layoutParams = params
+                },
+            )
+        }
+        quickScroll.addView(quickRow)
+        root.addView(quickScroll)
 
         val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

@@ -53,6 +53,13 @@ class SessionManager(
     private var screenThread: Thread? = null
     private var consoleThread: Thread? = null
 
+    /** 手指状态与上一次移动时间：触摸移动节流到 ~90Hz，避免刷爆固件触摸队列。 */
+    @Volatile
+    private var fingerDown = false
+
+    @Volatile
+    private var lastTouchMoveAt = 0L
+
     @Volatile
     var state: SessionState = SessionState.STOPPED
         private set
@@ -477,7 +484,24 @@ class SessionManager(
     }
 
     fun touchRatio(xRatio: Float, yRatio: Float, pressed: Boolean) {
-        vnc?.pointerRatio(xRatio, yRatio, pressed)
+        val client = vnc ?: return
+        val now = System.currentTimeMillis()
+        if (pressed) {
+            if (!fingerDown) {
+                // 按下必须立刻发出去
+                fingerDown = true
+                lastTouchMoveAt = now
+                client.pointerRatio(xRatio, yRatio, true)
+                return
+            }
+            if (now - lastTouchMoveAt < TOUCH_MOVE_INTERVAL_MS) return
+            lastTouchMoveAt = now
+            client.pointerRatio(xRatio, yRatio, true)
+        } else {
+            fingerDown = false
+            lastTouchMoveAt = 0L
+            client.pointerRatio(xRatio, yRatio, false)
+        }
     }
 
     fun key(qcode: String, down: Boolean) {
@@ -598,6 +622,9 @@ class SessionManager(
     }
 
     companion object {
+        /** 触摸移动最小间隔（毫秒），对应 Mirage ScreenFeed 的 ~90Hz。 */
+        private const val TOUCH_MOVE_INTERVAL_MS = 11L
+
         /** 会话在该目录下缓存 unix socket（cacheDir 可随时被系统清理）。 */
         fun runtimeRoot(context: Context): File = File(context.cacheDir, "runtime")
     }

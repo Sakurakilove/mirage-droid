@@ -48,6 +48,11 @@ class HubActivity : Activity() {
         refresh()
     }
 
+    override fun onDestroy() {
+        dismissProgress()
+        super.onDestroy()
+    }
+
     // ------------------------------------------------------------ 布局
 
     private fun buildContent(): View {
@@ -264,6 +269,24 @@ class HubActivity : Activity() {
             },
         )
 
+        if (state == SessionState.ERROR && !session?.lastError.isNullOrBlank()) {
+            card.addView(
+                Ui.text(
+                    this,
+                    session!!.lastError!!.lineSequence().firstOrNull().orEmpty().take(160),
+                    11.5f,
+                    Ui.ERROR,
+                ).apply {
+                    val p = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                    p.topMargin = Ui.dp(this@HubActivity, 6f)
+                    layoutParams = p
+                },
+            )
+        }
+
         Ui.clickable(card) {
             startActivity(
                 Intent(this, DeviceActivity::class.java).putExtra(DeviceActivity.EXTRA_DEVICE_ID, device.id),
@@ -432,6 +455,7 @@ class HubActivity : Activity() {
             if (importResult.firmware == null) {
                 runOnUiThread {
                     dismissProgress()
+                    if (isFinishing) return@runOnUiThread
                     AlertDialog.Builder(this)
                         .setTitle("导入失败")
                         .setMessage(importResult.message)
@@ -447,6 +471,7 @@ class HubActivity : Activity() {
             }
             runOnUiThread {
                 dismissProgress()
+                if (isFinishing) return@runOnUiThread
                 if (provision.ok) {
                     Ui.toast(this, provision.message)
                 } else {
@@ -497,6 +522,7 @@ class HubActivity : Activity() {
             }
             runOnUiThread {
                 dismissProgress()
+                if (isFinishing) return@runOnUiThread
                 Ui.toast(this, result.message)
                 refresh()
             }

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -39,6 +40,7 @@ class DeviceActivity : Activity(), SessionListener {
     companion object {
         const val EXTRA_DEVICE_ID = "device_id"
         private const val CONSOLE_PREVIEW_CHARS = 60000
+        private const val REQUEST_OTA = 4401
     }
 
     private lateinit var app: MirageApp
@@ -65,6 +67,7 @@ class DeviceActivity : Activity(), SessionListener {
 
     private var currentTab = 0
     private val tabTitles = listOf("屏幕", "控制台", "表盘", "设置")
+    private var progressDialog: AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,6 +102,7 @@ class DeviceActivity : Activity(), SessionListener {
     }
 
     override fun onDestroy() {
+        dismissProgress()
         session.removeListener(this)
         super.onDestroy()
     }
@@ -757,6 +761,12 @@ class DeviceActivity : Activity(), SessionListener {
         actionsCard.addView(Ui.text(this, "维护", 16f, Ui.TEXT, bold = true))
         actionsCard.addView(Ui.spacer(this, 10f))
         actionsCard.addView(
+            Ui.button(this, "导入 / 更换固件", primary = false) {
+                pickOta()
+            }.apply { layoutParams = fullWidthParams() },
+        )
+        actionsCard.addView(Ui.spacer(this, 8f))
+        actionsCard.addView(
             Ui.button(this, "查看启动命令", primary = false) {
                 showCommandLine()
             }.apply { layoutParams = fullWidthParams() },
@@ -770,7 +780,7 @@ class DeviceActivity : Activity(), SessionListener {
         actionsCard.addView(Ui.spacer(this, 8f))
         actionsCard.addView(
             Ui.button(this, "重新生成设备存储", primary = false) {
-                Ui.toast(this, "请回设备库长按设备 → 重新生成设备存储")
+                regenerateStorage()
             }.apply { layoutParams = fullWidthParams() },
         )
         actionsCard.addView(Ui.spacer(this, 8f))
@@ -786,6 +796,133 @@ class DeviceActivity : Activity(), SessionListener {
 
     private fun fullWidthParams(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+    // ------------------------------------------------------------ 固件 / 存储
+
+    private fun pickOta() {
+        if (!app.deviceLibAvailable()) {
+            AlertDialog.Builder(this)
+                .setTitle("无法导入固件")
+                .setMessage(
+                    "当前构建不含 devicelib（libmiragedroid.so），无法解包 OTA / 生成镜像。" +
+                        "请安装含模拟核心与 devicelib 的构建。",
+                )
+                .setPositiveButton("知道了", null)
+                .show()
+            return
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"),
+            )
+        }
+        try {
+            startActivityForResult(intent, REQUEST_OTA)
+        } catch (error: Throwable) {
+            Ui.toast(this, "没有可用的文件选择器：${error.message}")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_OTA) return
+        if (resultCode != RESULT_OK) return
+        val uri: Uri = data?.data ?: return
+        importFirmware(uri)
+    }
+
+    private fun importFirmware(uri: Uri) {
+        val target = device ?: session.device() ?: return
+        val dialog = showProgressDialog("正在导入固件", "准备中…")
+        Thread {
+            val importResult = app.importer.importOta(uri) { message -> setDialogMessage(dialog, message) }
+            val firmware = importResult.firmware
+            if (firmware == null) {
+                runOnUiThread {
+                    dismissProgress()
+                    if (isFinishing) return@runOnUiThread
+                    AlertDialog.Builder(this)
+                        .setTitle("导入失败")
+                        .setMessage(importResult.message)
+                        .setPositiveButton("知道了", null)
+                        .show()
+                }
+                return@Thread
+            }
+            val latest = app.store.device(target.id) ?: target
+            val provision = app.importer.provision(latest, firmware, latest.profile()) { message ->
+                setDialogMessage(dialog, message)
+            }
+            runOnUiThread {
+                dismissProgress()
+                if (isFinishing) return@runOnUiThread
+                device = app.store.device(target.id)
+                refreshHeader()
+                selectTab(currentTab)
+                if (provision.ok) {
+                    Ui.toast(this, provision.message)
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("固件已导入，但生成存储失败")
+                        .setMessage(provision.message)
+                        .setPositiveButton("知道了", null)
+                        .show()
+                }
+            }
+        }.apply { name = "DeviceFirmwareImport" }.start()
+    }
+
+    private fun regenerateStorage() {
+        val target = device ?: session.device()
+        val firmware = session.firmware()
+        if (target == null || firmware == null) {
+            Ui.toast(this, "还没有导入固件，请先「导入 / 更换固件」")
+            return
+        }
+        if (!app.deviceLibAvailable()) {
+            Ui.toast(this, "当前构建不含 devicelib，无法生成设备存储")
+            return
+        }
+        val dialog = showProgressDialog("正在重新生成设备存储", "准备中…")
+        Thread {
+            val result = app.importer.provision(target, firmware, target.profile()) { message ->
+                setDialogMessage(dialog, message)
+            }
+            runOnUiThread {
+                dismissProgress()
+                if (isFinishing) return@runOnUiThread
+                device = app.store.device(target.id)
+                refreshHeader()
+                selectTab(currentTab)
+                Ui.toast(this, result.message)
+            }
+        }.apply { name = "DeviceProvision" }.start()
+    }
+
+    private fun showProgressDialog(title: String, message: String): AlertDialog {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setCancelable(false)
+            .create()
+        progressDialog = dialog
+        dialog.show()
+        return dialog
+    }
+
+    private fun setDialogMessage(dialog: AlertDialog, message: String) {
+        runOnUiThread {
+            if (progressDialog === dialog && dialog.isShowing) dialog.setMessage(message)
+        }
+    }
+
+    private fun dismissProgress() {
+        progressDialog?.let { if (it.isShowing) it.dismiss() }
+        progressDialog = null
+    }
 
     private fun showCommandLine() {
         val command = session.qemuCommandLine() ?: "（尚未启动过，还没有命令行）"
