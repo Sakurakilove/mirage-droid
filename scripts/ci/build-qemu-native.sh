@@ -46,6 +46,7 @@ if [ ! -f "$WORK/build.ninja" ]; then
             --disable-guest-agent \
             --disable-slirp \
             --disable-capstone \
+            --disable-plugins \
             --disable-gtk \
             --disable-sdl \
             --disable-opengl \

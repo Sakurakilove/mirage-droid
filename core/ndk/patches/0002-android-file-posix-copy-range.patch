@@ -1,0 +1,19 @@
+--- a/block/file-posix.c
++++ b/block/file-posix.c
+@@ -2090,6 +2090,16 @@
+     return handle_aiocb_write_zeroes(aiocb);
+ }
+ 
++#if defined(__ANDROID__)
++/*
++ * bionic only declares copy_file_range() from API 34 on, while this build
++ * targets API 26.  Meson's has_function() probe can still succeed against a
++ * newer sysroot and then the call below is compiled without a declaration, so
++ * force QEMU's own syscall-based fallback instead of the libc entry point.
++ */
++# undef HAVE_COPY_FILE_RANGE
++#endif
++
+ #ifndef HAVE_COPY_FILE_RANGE
+ #if !defined(EMSCRIPTEN) && !defined(__GNU__)
+ static

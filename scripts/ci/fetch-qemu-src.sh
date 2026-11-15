@@ -10,8 +10,8 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=../core/ndk/versions.sh
-. "$HERE/../core/ndk/versions.sh"
+# shellcheck source=../../core/ndk/versions.sh
+. "$HERE/../../core/ndk/versions.sh"
 
 DEST="${1:?usage: fetch-qemu-src.sh <dest-dir>}"
 

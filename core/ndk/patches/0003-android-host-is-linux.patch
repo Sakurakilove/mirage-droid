@@ -1,0 +1,17 @@
+--- a/meson.build
++++ b/meson.build
+@@ -28,6 +28,14 @@
+ fs = import('fs')
+ 
+ host_os = host_machine.system()
++# Android hosts (Termux; and anything else built for bionic) run on a Linux
++# kernel with a Linux-compatible libc.  Meson reports them as 'android', which
++# makes QEMU compile out the CONFIG_LINUX support while __linux__ is still
++# defined -- so code that uses __linux__ calls functions whose definitions
++# were disabled.  Treat them as the Linux hosts they are.
++if host_os == 'android'
++  host_os = 'linux'
++endif
+ config_host = keyval.load(meson.current_build_dir() / 'config-host.mak')
+ 
+ # Temporary directory used for files created while

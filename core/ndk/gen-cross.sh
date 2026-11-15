@@ -103,7 +103,7 @@ fi
 # without PKG_CONFIG_LIBDIR a cross build can pick up the *build host's*
 # x86_64 .pc files and silently link the wrong libraries.
 write_shim aarch64-linux-android-pkg-config \
-    "PKG_CONFIG_LIBDIR=\"$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig\" PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config"
+    "env PKG_CONFIG_LIBDIR=\"$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig\" PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config"
 # Meson also probes for a plain `pkg-config` in [binaries]; give it the same
 # wrapper via the generated cross file (below), so no plain shim is needed.
 

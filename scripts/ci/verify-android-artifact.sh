@@ -15,8 +15,8 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=../core/ndk/versions.sh
-. "$HERE/../core/ndk/versions.sh"
+# shellcheck source=../../core/ndk/versions.sh
+. "$HERE/../../core/ndk/versions.sh"
 
 DIR="${1:?usage: verify-android-artifact.sh <package-dir>}"
 LIB="$DIR/lib"
