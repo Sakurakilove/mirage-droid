@@ -1,23 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      隐私：本 App 不需要任何网络权限（INTERNET 未声明）——固件导入、镜像生成、
+      VNC/QMP/NSH 全部走本机 unix socket 与本地文件。
+    -->
     <application
+        android:name=".MirageApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:largeHeap="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.MirageDroid"
-        android:largeHeap="true">
+        android:theme="@style/Theme.MirageDroid">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.HubActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.DeviceActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:parentActivityName=".ui.HubActivity" />
+
+        <activity
+            android:name=".ui.ConsoleActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:parentActivityName=".ui.DeviceActivity" />
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:parentActivityName=".ui.HubActivity" />
     </application>
 </manifest>

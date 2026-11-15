@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">幻影模拟器</string>
+    <string name="app_name_full">幻影模拟器 MirageDroid</string>
 </resources>
