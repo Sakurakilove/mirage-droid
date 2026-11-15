@@ -1,0 +1,16 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1372,7 +1372,12 @@
+ if host_os != 'windows'
+   have_shm_open = cc.has_function('shm_open')
+   if not have_shm_open
+-    rt = cc.find_library('rt', required: true)
++    # Android/bionic has neither shm_open() nor a separate librt (the POSIX
++    # clock and shared-memory entry points live in libc).  util/oslib-posix.c
++    # supplies a file-backed shm_open()/shm_unlink() under __ANDROID__
++    # (core/ndk/patches/0001), so the librt fallback must not be mandatory
++    # there.  cc.get_define() is a preprocessor probe, safe when crossing.
++    rt = cc.find_library('rt', required: cc.get_define('__ANDROID__') == '')
+   endif
+ endif
+ 
