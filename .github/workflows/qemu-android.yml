@@ -37,8 +37,7 @@ jobs:
     timeout-minutes: 75
     env:
       NDK_VERSION: r27c
-      NDK_API: '26'
-      NDK_ROOT: /opt/android-ndk-r27c
+      NDK_API: '28'
       NDK_ZIP: /opt/ndk-cache/android-ndk-r27c-linux.zip
       DEPS: /opt/mirage-deps
       CCACHE_DIR: /opt/ccache
@@ -65,26 +64,40 @@ jobs:
           ninja --version
           ccache --version | head -1
 
-      - name: Restore NDK zip
+      - name: Restore pinned NDK zip (fallback when the runner has no r27)
         uses: actions/cache@v4
         with:
           path: /opt/ndk-cache
           key: ndk-zip-${{ env.NDK_VERSION }}-linux-x86_64-v1
 
-      - name: Install Android NDK
+      - name: Select Android NDK (${{ env.NDK_VERSION }})
         run: |
-          if [ ! -d "$NDK_ROOT/toolchains" ]; then
-            if [ ! -f "$NDK_ZIP" ]; then
-              echo "downloading NDK ${NDK_VERSION}"
-              curl -fL --retry 3 --connect-timeout 30 \
-                -o "$NDK_ZIP.part" \
-                "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
-              mv "$NDK_ZIP.part" "$NDK_ZIP"
+          set -e
+          # Prefer the runner's preinstalled r27 image to save a 660 MB
+          # download; fall back to the exact pinned NDK zip otherwise, so the
+          # build stays reproducible when a runner image moves to r28+.
+          cand="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -n "$cand" ] && [ -f "$cand/source.properties" ] && \
+             grep -qE '^Pkg\.Revision = 27\.' "$cand/source.properties"; then
+            ndk="$cand"
+            echo "using the runner's preinstalled NDK: $ndk"
+          else
+            ndk="/opt/android-ndk-${NDK_VERSION}"
+            if [ ! -d "$ndk/toolchains" ]; then
+              if [ ! -f "$NDK_ZIP" ]; then
+                echo "downloading NDK ${NDK_VERSION}"
+                curl -fL --retry 3 --connect-timeout 30 \
+                  -o "$NDK_ZIP.part" \
+                  "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+                mv "$NDK_ZIP.part" "$NDK_ZIP"
+              fi
+              sudo unzip -q -o "$NDK_ZIP" -d /opt
             fi
-            sudo unzip -q -o "$NDK_ZIP" -d /opt
           fi
-          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
-          echo "NDK: $NDK_ROOT"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "NDK: $ndk"
+          grep '^Pkg.Revision' "$ndk/source.properties"
+          "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
 
       - name: Restore cross-built dependencies (glib, pixman)
         id: deps-cache

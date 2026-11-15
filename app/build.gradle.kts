@@ -9,7 +9,8 @@ android {
 
     defaultConfig {
         applicationId = "com.zhaoge.miragedroid"
-        minSdk = 26
+        // qemu 交叉编译使用 NDK API 28：bionic 的 iconv.h 自 API 28 才可用（glib 硬依赖）
+        minSdk = 28
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"

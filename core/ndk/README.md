@@ -8,6 +8,10 @@ The heavy build runs in GitHub Actions (`.github/workflows/qemu-android.yml`):
 Google ships only a linux-x86_64 NDK, so a Termux (aarch64 Android) machine
 cannot run the cross toolchain itself.
 
+**The target API level is 28 (Android 9).** That is the first Android
+release whose bionic exposes `<iconv.h>`, and glib cannot be built without
+iconv. The app's `minSdk` therefore has to be 28 as well.
+
 ## Why the extra steps
 
 * **glib and pixman have no Android package.** They are cross-compiled from
@@ -33,7 +37,7 @@ cannot run the cross toolchain itself.
 
 | File | Purpose |
 |---|---|
-| `versions.sh` | All pins: qemu-miwear commit, NDK r27c/API 26, glib 2.82.4, pixman 0.44.2, meson 1.7.2. CI caches key off it. |
+| `versions.sh` | All pins: qemu-miwear commit, NDK r27c/API 28, glib 2.82.4, pixman 0.44.2, meson 1.7.2. CI caches key off it. |
 | `gen-cross.sh` | Writes the Meson cross file (`android-arm64.ini`) and the `--cross-prefix` shims (`shim/aarch64-linux-android-*`). |
 | `apply-patches.sh` | Applies `patches/*.patch` to a checkout, idempotently. |
 | `build-deps.sh` | Cross-builds glib + pixman into `$DEPS`, synthesises `zlib.pc`. Cached in CI. |

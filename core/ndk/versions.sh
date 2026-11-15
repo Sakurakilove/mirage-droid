@@ -16,7 +16,9 @@ QEMU_COMMIT="fbf301ca28dced77b71a07a250c278f236a4de5c"
 # Google publishes the linux-x86_64 toolchain only; the Termux (aarch64
 # bionic) host cannot run it, so the cross build happens in GitHub Actions.
 NDK_VERSION="r27c"
-NDK_API="26"
+# API 28 (Android 9) and not 26: glib requires iconv, and bionic only exposes
+# <iconv.h> at API >= 28 (__INTRODUCED_IN(28)).  The app minSdk must match.
+NDK_API="28"
 NDK_ABI="arm64-v8a"
 NDK_TARGET="aarch64-linux-android"
 
