@@ -60,7 +60,7 @@ printf '%s' "$SHIM" > "$CONFIG_STAMP"
 cd "$BUILD"
 "$QEMU_SRC/configure" \
     --target-list=arm-softmmu \
-    --cross-prefix="$SHIM/" \
+    --cross-prefix="$SHIM/aarch64-linux-android-" \
     --disable-werror \
     --disable-docs \
     --disable-tools \

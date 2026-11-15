@@ -152,4 +152,4 @@ growing_stack = false
 EOF
 
 echo "wrote $CROSS"
-echo "wrote shims in $SHIM (cross-prefix: $SHIM/) "
+echo "wrote shims in $SHIM (cross-prefix: $SHIM/aarch64-linux-android-)"
