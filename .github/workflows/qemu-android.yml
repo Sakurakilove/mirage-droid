@@ -1,0 +1,134 @@
+name: qemu-android
+
+# Cross-builds qemu-system-arm for Android (arm64-v8a, bionic) with the
+# Android NDK.  The output artifact is what the Android app ships in
+# jniLibs: libqemu-system-arm.so plus its bundled .so dependencies, with
+# DT_RUNPATH=$ORIGIN and an unversioned name/SONAME so AGP can package them.
+#
+# The emulator itself is validated on-device (Termux, also bionic): unpack the
+# artifact, `LD_LIBRARY_PATH=lib ./lib/libqemu-system-arm.so -M
+# miwear,profile=help` must list the board profiles.  On the x86_64 runner only
+# the static checks in scripts/ci/verify-android-artifact.sh can run.
+
+on:
+  push:
+    paths:
+      - 'core/ndk/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/qemu-android.yml'
+  pull_request:
+    paths:
+      - 'core/ndk/**'
+      - 'scripts/ci/**'
+      - '.github/workflows/qemu-android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm64-v8a:
+    name: qemu-system-arm / arm64-v8a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      NDK_VERSION: r27c
+      NDK_API: '26'
+      NDK_ROOT: /opt/android-ndk-r27c
+      NDK_ZIP: /opt/ndk-cache/android-ndk-r27c-linux.zip
+      DEPS: /opt/mirage-deps
+      CCACHE_DIR: /opt/ccache
+      WORK: ${{ github.workspace }}/ndk-work
+      MIRAGE_CCACHE: '1'
+      JOBS: '3'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config patchelf ccache \
+            python3 python3-pip python3-venv git curl ca-certificates \
+            unzip xz-utils bzip2 diffutils file
+          python3 -m pip install --user --break-system-packages \
+            'meson==1.7.2' 'ninja==1.11.1.4'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /opt/ndk-cache /opt/ccache "$DEPS"
+          sudo chown -R "$USER":"$USER" /opt/ndk-cache /opt/ccache "$DEPS"
+          meson --version
+          ninja --version
+          ccache --version | head -1
+
+      - name: Restore NDK zip
+        uses: actions/cache@v4
+        with:
+          path: /opt/ndk-cache
+          key: ndk-zip-${{ env.NDK_VERSION }}-linux-x86_64-v1
+
+      - name: Install Android NDK
+        run: |
+          if [ ! -d "$NDK_ROOT/toolchains" ]; then
+            if [ ! -f "$NDK_ZIP" ]; then
+              echo "downloading NDK ${NDK_VERSION}"
+              curl -fL --retry 3 --connect-timeout 30 \
+                -o "$NDK_ZIP.part" \
+                "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+              mv "$NDK_ZIP.part" "$NDK_ZIP"
+            fi
+            sudo unzip -q -o "$NDK_ZIP" -d /opt
+          fi
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+          echo "NDK: $NDK_ROOT"
+
+      - name: Restore cross-built dependencies (glib, pixman)
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/mirage-deps
+          key: mirage-deps-${{ env.NDK_API }}-${{ hashFiles('core/ndk/versions.sh', 'core/ndk/build-deps.sh', 'core/ndk/gen-cross.sh') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /opt/ccache
+          key: ccache-qemu-${{ env.NDK_API }}-${{ github.sha }}
+          restore-keys: |
+            ccache-qemu-${{ env.NDK_API }}-
+
+      - name: Fetch qemu-miwear at the pinned commit
+        run: bash scripts/ci/fetch-qemu-src.sh "$GITHUB_WORKSPACE/core/qemu"
+
+      - name: Build glib + pixman (NDK cross)
+        run: bash core/ndk/build-deps.sh
+
+      - name: Build qemu-system-arm (NDK cross)
+        run: bash core/ndk/build-qemu.sh
+
+      - name: Package for Android (jniLibs layout)
+        run: bash core/ndk/package-android.sh --out dist/qemu-android-arm64
+
+      - name: Verify artifact (statically)
+        run: bash scripts/ci/verify-android-artifact.sh dist/qemu-android-arm64
+
+      - name: Upload qemu-android-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-android-arm64
+          path: dist/qemu-android-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-android-logs
+          path: ${{ env.WORK }}/logs
+          if-no-files-found: ignore
+          retention-days: 7
