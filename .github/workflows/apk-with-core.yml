@@ -114,10 +114,12 @@ jobs:
             echo "run_url=${rurl}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Checkout（与 qemu artifact 同一 commit）
+      # App 源码取当前 main（可能比 qemu run 新）；qemu artifact 取指定 run。
+      # 二者不一致不影响产物：qemu 二进制与 app 代码是独立演进的。
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.qemu-run.outputs.run_sha || 'main' }}
+          ref: main
           submodules: false
 
       - name: 下载 qemu-android artifact

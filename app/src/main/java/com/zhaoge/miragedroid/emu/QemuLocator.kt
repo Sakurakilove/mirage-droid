@@ -173,6 +173,12 @@ object QemuLocator {
      * `filesDir/qemu/pc-bios`，其次 nativeLibraryDir 旁边的 share/qemu。
      */
     fun keymapsDir(context: Context, executable: File): File? {
+        // 先从 APK assets 解压 qemu 数据（keymaps 约 30 MB）；解压后的
+        // filesDir/qemu/pc-bios 就是 -L 需要的数据目录。缺了它 QEMU 会以
+        // "could not find keymap file for language 'en-us'" 直接退出。
+        QemuAssets.ensure(context)?.let { dir ->
+            if (File(dir, "keymaps/en-us").isFile) return dir
+        }
         val assetDir = File(File(context.filesDir, "qemu"), "pc-bios")
         if (File(assetDir, "keymaps/en-us").isFile) return assetDir
         val libDir = executable.parentFile ?: return null
