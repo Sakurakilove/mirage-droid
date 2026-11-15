@@ -22,14 +22,19 @@
 ## 构建
 
 所有重型编译都在 GitHub Actions 上完成（NDK 交叉编译 glib / pixman / QEMU + Gradle 打包），
-本地只需 Java 21（可选）。
+本地只需 Java 21（可选）。完整流程、产物位置与排错见 [`docs/BUILD.md`](docs/BUILD.md)。
 
 ```bash
-# 本地（可选）：只跑纯 JVM 测试
+# 本地（可选）：纯 JVM 测试
 gradle :app:testDebugUnitTest
-
-# APK 由 CI 产出：Actions → android → Artifacts
+# 本地构建 debug APK（需要 Android SDK）
+gradle :app:assembleDebug
+# 宿主 devicelib（镜像构建 CLI）
+bash tools/build_devlib.sh && python3 tools/test_devlib.py
 ```
+
+CI：`android` 出 debug APK；`host-tests` 跑 JVM/devicelib/lint；`release` 打 tag `v*` 自动发布
+（未配置签名 Secrets 时回退 debug 签名）。workflow 一览见 [`.github/workflows/README.md`](.github/workflows/README.md)。
 
 ## 许可
 

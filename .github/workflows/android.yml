@@ -1,36 +1,120 @@
 name: android
 
+# Gradle 构建 debug APK（runner 预装 Android SDK，不引入 android-actions/setup-android）。
+# 产物：Actions → Artifacts → mirage-droid-debug。
+# 单元测试由 host-tests.yml 单独执行；这里保留一次 testDebugUnitTest 作为 APK 前的兜底闸门。
+
 on:
   push:
+    paths:
+      - 'app/**'
+      - 'core/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/android.yml'
   pull_request:
+    paths:
+      - 'app/**'
+      - 'core/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一 ref 上新的 push 到达时取消旧的构建，节省 runner 时间
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '8.10.2'
+  # debug APK 合计超过该字节数时给出告警（软上限，不 fail）
+  APK_SIZE_WARN_BYTES: '104857600'
 
 jobs:
   build:
+    name: 构建 debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
-      - uses: actions/setup-java@v4
+
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
-      - name: Android SDK env
+
+      - name: Android SDK 环境
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
-          ls "$ANDROID_HOME/platforms" 2>/dev/null || true
-          ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          {
+            echo "ANDROID_HOME=$SDK"
+            echo "ANDROID_SDK_ROOT=$SDK"
+          } >> "$GITHUB_ENV"
+          ls "$SDK/platforms" 2>/dev/null || true
+          ls "$SDK/build-tools" 2>/dev/null || true
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.10.2'
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          # 依赖/构建缓存：main 可写，PR 只读，避免 PR 污染缓存
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
       - name: Assemble debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
+
       - name: Unit tests
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
-      - uses: actions/upload-artifact@v4
+
+      - name: APK 大小报告
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "::error::未找到 debug APK（app/build/outputs/apk/debug）"
+            exit 1
+          fi
+          {
+            echo "### debug APK"
+            echo ""
+            echo "| 文件 | 字节 | 大小 |"
+            echo "| --- | --- | --- |"
+            for apk in "${apks[@]}"; do
+              bytes="$(stat -c %s "$apk")"
+              human="$(du -h "$apk" | cut -f1)"
+              echo "| \`$(basename "$apk")\` | ${bytes} | ${human} |"
+            done
+            echo ""
+            echo "> 上限告警阈值：$((APK_SIZE_WARN_BYTES / 1024 / 1024)) MiB（仅告警）"
+          } >> "$GITHUB_STEP_SUMMARY"
+          total="$(du -cb "${apks[@]}" | tail -n1 | cut -f1)"
+          echo "APK 合计 ${total} B"
+          if [ "$total" -gt "$APK_SIZE_WARN_BYTES" ]; then
+            echo "::warning title=APK 偏大::debug APK 合计 ${total} B，超过 $((APK_SIZE_WARN_BYTES / 1024 / 1024)) MiB 软上限，检查是否误打包大文件（qemu/固件/资源）"
+          fi
+
+      - name: 上传 debug APK
+        uses: actions/upload-artifact@v4
         with:
           name: mirage-droid-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传测试报告（失败定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-report
+          path: |
+            app/build/test-results/testDebugUnitTest/**/*.xml
+            app/build/reports/tests/testDebugUnitTest/**
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,330 @@
+name: firmware-smoke
+
+# 手动固件开机冒烟：下载固件（只在 runner 临时目录）→ 构建 devicelib 与 host 原生 QEMU →
+# 生成 P65/q66 设备镜像 → 启动 → QMP screendump → 判定屏幕非全黑 → 上传截图/日志。
+#
+# ⚠️ 固件策略：固件绝不缓存（禁止 actions/cache）、绝不上传 artifact，运行结束随 runner 销毁。
+#    本 workflow 的 artifact 只含截图与文本日志。
+#
+# 需要手动提供至少一种固件来源（GitHub workflow_dispatch 不支持文件直接上传，请给直链）：
+#   - firmware_url：OTA zip 直链（zip 内 vela_ap.bin + vela_resource.bin），或 vela_ap.bin 直链
+#   - vela_ap_url + vela_resource_url：分别给两个裸 bin 直链
+#   （直链可以是对象存储的一次性 URL / 私有 release asset 临时链接；URL 会在日志中脱敏）
+#
+# 依赖（尚未合入时本 workflow 会明确 SKIP 而不是失败）：
+#   - tools/build_devlib.sh（devicecore）
+#   - scripts/ci/build-qemu-native.sh（qemu-core）
+#   - scripts/release/qmp-screendump.py、scripts/release/png-nonblack.py（本仓库）
+#
+# 启动命令来自 qemu-core 提供的 Mirage LaunchPlan 模板；P65 面板 432x514。
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'OTA zip 直链（或 vela_ap.bin 直链）；zip 内应含 vela_ap.bin + vela_resource.bin'
+        required: false
+        type: string
+      vela_ap_url:
+        description: 'vela_ap.bin 直链（与 vela_resource_url 一起使用，可替代 firmware_url）'
+        required: false
+        type: string
+      vela_resource_url:
+        description: 'vela_resource.bin 直链（与 vela_ap_url 一起使用）'
+        required: false
+        type: string
+      profile:
+        description: '设备 profile'
+        required: true
+        type: choice
+        options:
+          - p65
+          - q66
+        default: p65
+      boot_timeout_seconds:
+        description: '等待屏幕点亮的总超时（秒）'
+        required: false
+        type: string
+        default: '180'
+      min_nonblack_ratio:
+        description: '非黑像素最低占比（0.001 = 0.1%）'
+        required: false
+        type: string
+        default: '0.001'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: 固件开机冒烟（${{ github.event.inputs.profile }}）
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: 依赖检查（缺失则 SKIP）
+        id: deps
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -f tools/build_devlib.sh ] || missing+=("tools/build_devlib.sh（devicecore 负责）")
+          [ -f scripts/ci/build-qemu-native.sh ] || missing+=("scripts/ci/build-qemu-native.sh（qemu-core 负责）")
+          [ -f scripts/release/qmp-screendump.py ] || missing+=("scripts/release/qmp-screendump.py")
+          [ -f scripts/release/png-nonblack.py ] || missing+=("scripts/release/png-nonblack.py")
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::warning title=固件冒烟跳过::依赖未合入：${missing[*]}"
+            {
+              echo "## 固件冒烟跳过（依赖未就绪）"
+              echo ""
+              for item in "${missing[@]}"; do echo "- 缺少：${item}"; done
+              echo ""
+              echo "依赖合入后重新手动运行即可，无需改本 workflow。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: 下载固件（仅运行期临时目录）
+        if: steps.deps.outputs.ready == 'true'
+        id: fw
+        env:
+          FIRMWARE_URL: ${{ github.event.inputs.firmware_url }}
+          VELA_AP_URL: ${{ github.event.inputs.vela_ap_url }}
+          VELA_RESOURCE_URL: ${{ github.event.inputs.vela_resource_url }}
+        run: |
+          set -euo pipefail
+          for url in "$FIRMWARE_URL" "$VELA_AP_URL" "$VELA_RESOURCE_URL"; do
+            if [ -n "$url" ]; then echo "::add-mask::$url"; fi
+          done
+          if [ -z "$FIRMWARE_URL" ] && { [ -z "$VELA_AP_URL" ] || [ -z "$VELA_RESOURCE_URL" ]; }; then
+            echo "::error title=缺少固件来源::请提供 firmware_url（OTA zip 直链），或同时提供 vela_ap_url + vela_resource_url"
+            exit 1
+          fi
+
+          fw_dir="$RUNNER_TEMP/fw"
+          rm -rf "$fw_dir"
+          mkdir -p "$fw_dir"
+
+          download() {
+            echo "下载：$(printf '%s' "$1" | sed -E 's/[?#].*$//')（URL 已脱敏）"
+            curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"
+          }
+
+          if [ -n "$FIRMWARE_URL" ]; then
+            download "$FIRMWARE_URL" "$fw_dir/download.bin"
+            if unzip -tq "$fw_dir/download.bin" >/dev/null 2>&1; then
+              echo "识别为 zip（OTA 包），解包到临时目录"
+              mkdir -p "$fw_dir/ota"
+              unzip -oq "$fw_dir/download.bin" -d "$fw_dir/ota"
+            else
+              echo "非 zip，按 vela_ap.bin 处理"
+              mv "$fw_dir/download.bin" "$fw_dir/vela_ap.bin"
+            fi
+          fi
+          if [ -n "$VELA_AP_URL" ]; then
+            download "$VELA_AP_URL" "$fw_dir/vela_ap.bin"
+          fi
+          if [ -n "$VELA_RESOURCE_URL" ]; then
+            download "$VELA_RESOURCE_URL" "$fw_dir/vela_resource.bin"
+          fi
+
+          ap="$(find "$fw_dir" -type f -name 'vela_ap.bin' -print -quit)"
+          resource="$(find "$fw_dir" -type f -name 'vela_resource.bin' -print -quit)"
+          if [ -z "$ap" ] || [ ! -s "$ap" ]; then
+            echo "::error title=缺少 vela_ap.bin::固件来源里没有找到非空的 vela_ap.bin"
+            find "$fw_dir" -maxdepth 3 -type f 2>/dev/null | sort | head -n 40 || true
+            exit 1
+          fi
+          if [ -z "$resource" ] || [ ! -s "$resource" ]; then
+            echo "::error title=缺少 vela_resource.bin::固件来源里没有找到非空的 vela_resource.bin"
+            find "$fw_dir" -maxdepth 3 -type f 2>/dev/null | sort | head -n 40 || true
+            exit 1
+          fi
+
+          # 只打印大小，不打印内容；固件不得进入 artifact / 缓存
+          echo "vela_ap.bin: $(stat -c %s "$ap") bytes"
+          echo "vela_resource.bin: $(stat -c %s "$resource") bytes"
+
+          # 统一成 mkdevice 要求的目录布局：一个目录里同时放 vela_ap.bin + vela_resource.bin
+          fw_input="$fw_dir/input"
+          rm -rf "$fw_input"
+          mkdir -p "$fw_input"
+          cp "$ap" "$fw_input/vela_ap.bin"
+          cp "$resource" "$fw_input/vela_resource.bin"
+          {
+            echo "fwdir=$fw_input"
+            echo "ap=$fw_input/vela_ap.bin"
+            echo "resource=$fw_input/vela_resource.bin"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 安装构建依赖
+        if: steps.deps.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential unzip curl zlib1g-dev git \
+            libglib2.0-dev libpixman-1-dev libpng-dev \
+            meson ninja-build pkg-config python3-venv
+
+      - name: 构建 devicelib（host gcc）
+        if: steps.deps.outputs.ready == 'true'
+        id: devlib
+        run: |
+          set -euo pipefail
+          CC=gcc bash tools/build_devlib.sh 2>&1 | tee "$RUNNER_TEMP/build-devlib.log"
+          test -x build/devlib/mkdevice
+          echo "mkdevice=build/devlib/mkdevice" >> "$GITHUB_OUTPUT"
+
+      - name: 构建 host 原生 QEMU（qemu-core 脚本）
+        if: steps.deps.outputs.ready == 'true'
+        id: qemu
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/qemu-native"
+          QEMU_SRC="$RUNNER_TEMP/qemu-src" bash scripts/ci/build-qemu-native.sh "$out"
+          test -x "$out/qemu-system-arm"
+          echo "qemu-system-arm: $("$out/qemu-system-arm" --version | head -n1)"
+          echo "profile=help:" 
+          timeout 60 "$out/qemu-system-arm" -M miwear,profile=help 2>&1 | head -n 20 || true
+          echo "qemu=$out/qemu-system-arm" >> "$GITHUB_OUTPUT"
+
+      - name: 生成设备镜像（mkdevice provision）
+        if: steps.deps.outputs.ready == 'true'
+        id: images
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
+        run: |
+          set -euo pipefail
+          dev_dir="$RUNNER_TEMP/device"
+          rm -rf "$dev_dir"
+          mkdir -p "$dev_dir"
+          build/devlib/mkdevice provision \
+            --profile "$PROFILE" \
+            --firmware "${{ steps.fw.outputs.fwdir }}" \
+            --device "$dev_dir" 2>&1 | tee "$RUNNER_TEMP/provision.log"
+          ls -lh "$dev_dir"
+          test -s "$dev_dir/nor.img"
+          test -s "$dev_dir/nand.img"
+          # 校验镜像尺寸/factory 字段（devicecore 提供）
+          build/devlib/mkdevice verify --profile "$PROFILE" --device "$dev_dir" \
+            2>&1 | tee -a "$RUNNER_TEMP/provision.log"
+          echo "device=$dev_dir" >> "$GITHUB_OUTPUT"
+
+      - name: 启动 QEMU 并判定屏幕非全黑
+        if: steps.deps.outputs.ready == 'true'
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
+          BOOT_TIMEOUT_SECONDS: ${{ github.event.inputs.boot_timeout_seconds }}
+          MIN_RATIO: ${{ github.event.inputs.min_nonblack_ratio }}
+          QEMU_BIN: ${{ steps.qemu.outputs.qemu }}
+          FW_AP: ${{ steps.fw.outputs.ap }}
+          DEV_DIR: ${{ steps.images.outputs.device }}
+        run: |
+          set -euo pipefail
+          run_dir="$RUNNER_TEMP/run"
+          rm -rf "$run_dir"
+          mkdir -p "$run_dir"
+
+          # 命令模板来自 qemu-core（Mirage LaunchPlan / P65）：console UART=1，-monitor none 必须给
+          "$QEMU_BIN" \
+            -M "miwear,profile=${PROFILE},flash-image=${DEV_DIR}/nor.img,nand-image=${DEV_DIR}/nand.img" \
+            -kernel "$FW_AP" \
+            -name "Mirage: ${PROFILE}" \
+            -display none \
+            -vnc "unix:${run_dir}/vnc.sock" \
+            -qmp "unix:${run_dir}/qmp.sock,server=on,wait=off" \
+            -monitor none \
+            -chardev "socket,id=con,unix:${run_dir}/console.sock,server=on,wait=off,logfile=${run_dir}/console.log" \
+            -serial "0=file:${run_dir}/uart0.log" \
+            -serial "1=chardev:con" \
+            -serial "2=file:${run_dir}/uart2.log" \
+            -global driver=bes.btss,property=bdaddr,value=AA:BB:CC:DD:EE:FF \
+            -D "${run_dir}/qemu.log" \
+            > "$run_dir/qemu.out" 2>&1 &
+          qemu_pid=$!
+          echo "$qemu_pid" > "$run_dir/qemu.pid"
+          echo "QEMU 已启动 pid=${qemu_pid}"
+
+          shot="$RUNNER_TEMP/screen.png"
+          deadline=$(( SECONDS + BOOT_TIMEOUT_SECONDS ))
+          attempt=0
+          passed=false
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            attempt=$((attempt + 1))
+            sleep 5
+            if ! kill -0 "$qemu_pid" 2>/dev/null; then
+              echo "::error title=QEMU 提前退出::QEMU 进程已结束，无法截图"
+              break
+            fi
+            if ! python3 scripts/release/qmp-screendump.py \
+                --socket "$run_dir/qmp.sock" --out "$shot" --timeout 15; then
+              echo "第 ${attempt} 次截图失败（QEMU/QMP 还没就绪），继续等待"
+              continue
+            fi
+            if python3 scripts/release/png-nonblack.py "$shot" --min-ratio "$MIN_RATIO"; then
+              passed=true
+              break
+            fi
+            echo "第 ${attempt} 次截图仍是黑屏，继续等待"
+          done
+
+          {
+            echo "## 固件冒烟结果（${PROFILE}）"
+            echo ""
+            echo "- 判定：$([ "$passed" = "true" ] && echo '✅ 屏幕非全黑' || echo '❌ 未点亮/超时')"
+            echo "- 尝试截图次数：${attempt}"
+            echo "- 超时设置：${BOOT_TIMEOUT_SECONDS}s，非黑阈值：${MIN_RATIO}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$passed" != "true" ]; then
+            echo "::group::QEMU / UART 日志尾部"
+            for log in "$run_dir/qemu.out" "$run_dir/uart0.log" "$run_dir/uart2.log" "$run_dir/console.log"; do
+              if [ -f "$log" ]; then
+                echo "--- $log ---"
+                tail -n 80 "$log" || true
+              fi
+            done
+            echo "::endgroup::"
+            echo "::error title=固件未点亮屏幕::超时（${BOOT_TIMEOUT_SECONDS}s）或屏幕全黑，已输出日志尾部"
+            exit 1
+          fi
+          echo "冒烟通过：${shot}"
+
+      - name: 上传截图与日志（不含固件）
+        if: always() && steps.deps.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-smoke-${{ github.event.inputs.profile }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/screen.png
+            ${{ runner.temp }}/run/*.log
+            ${{ runner.temp }}/run/qemu.out
+            ${{ runner.temp }}/build-devlib.log
+            ${{ runner.temp }}/provision.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 清理临时固件（尽力而为）
+        if: always() && steps.deps.outputs.ready == 'true'
+        run: |
+          set -uo pipefail
+          if [ -f "$RUNNER_TEMP/run/qemu.pid" ]; then
+            pid="$(cat "$RUNNER_TEMP/run/qemu.pid" 2>/dev/null || true)"
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+              sleep 1
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          fi
+          # 固件仅存在于 $RUNNER_TEMP（运行结束销毁），这里再主动删除一次
+          rm -rf "$RUNNER_TEMP/fw" "$RUNNER_TEMP/device" 2>/dev/null || true
+          echo "已清理临时固件与镜像"

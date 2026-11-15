@@ -84,7 +84,7 @@ jobs:
         with:
           submodules: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -159,6 +159,8 @@ jobs:
 
       - name: devicelib 宿主构建
         id: devlib-build
+        env:
+          CC: gcc
         run: |
           set -euo pipefail
           if [ ! -f tools/build_devlib.sh ]; then

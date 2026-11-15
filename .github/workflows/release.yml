@@ -115,7 +115,7 @@ jobs:
 
           echo "发布 tag=v${version} | 构建类型=${build_type} | commit=${commit} | qemu-miwear=${qemu_commit}"
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
