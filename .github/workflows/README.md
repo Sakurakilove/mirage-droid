@@ -9,10 +9,11 @@
 
 | 文件 | 触发 | 典型耗时 | 产物 | 归属 |
 | --- | --- | --- | --- | --- |
-| `android.yml` | `push` / `pull_request`（仅 app/core/gradle 相关路径）/ `workflow_dispatch` | ~2–3 min | Artifact `mirage-droid-debug`（debug APK）、`android-test-report` | ci-release |
+| `android.yml` | `push` / `pull_request`（仅 app/core/gradle 相关路径）/ `workflow_dispatch` | ~2–3 min | Artifact `mirage-droid-debug`（**普通 APK，不含模拟核心**）、`android-test-report` | ci-release |
 | `host-tests.yml` | `push` / `pull_request`（仅相关路径）/ `workflow_dispatch` | ~3–6 min | Artifact `junit-report`、`devicelib-logs` | ci-release |
 | `release.yml` | tag `v*` / `workflow_dispatch` | ~4–6 min | GitHub Release：APK、源码快照、`SHA256SUMS`、`SOURCE-OFFER.md`、`LICENSE` | ci-release |
 | `qemu-android.yml` | `push`/`pull_request`（`core/ndk/**`、`scripts/ci/**`、自身） / `workflow_dispatch` | 20–40 min（ccache 命中后约 5–10 min） | Artifact `qemu-android-arm64`（`libqemu-system-arm.so` + 依赖，arm64-v8a）、失败时 `qemu-android-logs` | qemu-core |
+| `apk-with-core.yml` | `qemu-android` 成功后自动（`workflow_run`）/ 手动（可指定 run_id）/ push main（可选） | ~5–8 min | Artifact `mirage-droid-core-debug`：**带模拟核心的 debug APK（可真开机）** + BUILD-INFO + SHA256SUMS | ci-release |
 | `firmware-smoke.yml` | **仅手动** `workflow_dispatch` | 30–60 min（含宿主 QEMU 构建） | Artifact：截图 PNG + UART/QEMU/console 日志 | ci-release |
 
 > 约定：**任何 workflow 都不下载、不缓存、不上传小米固件**（`vela_ap.bin` / `vela_resource.bin` / OTA zip）。
@@ -68,6 +69,22 @@
 - 合规产物：源码快照 `mirage-droid-<ver>-source.tar.gz`、`SOURCE-OFFER.md`（AGPL-3.0 / GPL-2.0 源码获取方式、
   qemu-miwear submodule commit、构建脚本清单）、`LICENSE`。固件绝不进 Release。
 - 演练：`Actions → release → Run workflow`，`tag` 填测试 tag，勾选 `dry_run=true`（只构建不发布）。
+
+### `apk-with-core.yml` — 把模拟核心塞进 APK（真开机交付通道）
+
+- 触发：
+  - `workflow_run`：`qemu-android` 完成且 `conclusion == success` 时自动跑（用 `github.event.workflow_run.id` 拉 artifact）；
+  - `workflow_dispatch`：可指定 `run_id`（留空取最近一次成功的 qemu-android run）；
+  - push 到 main（可选）：同上取最近一次成功 run，没有则告警跳过。
+- 流程：解析 qemu run（校验属 qemu-android 且成功）→ checkout 到该 run 的 commit → `actions/download-artifact`
+  （`qemu-android-arm64`）→ 解包并校验布局（`lib/libqemu-system-arm.so` 存在、AArch64 ELF、bionic interpreter、
+  含 `Board profiles` 表、无 glibc 依赖、大小合理）→ `lib/*.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`、
+  `share/qemu/keymaps` 拷入 `app/src/main/assets/qemu/pc-bios/keymaps/` → `assembleDebug` →
+  APK 内断言（`lib/arm64-v8a/libqemu-system-arm.so` 存在且 ≥1 MiB、.so 数量齐全、keymaps 在 assets）→
+  上传 `mirage-droid-core-debug`（APK + `BUILD-INFO.txt` + `SHA256SUMS`）。
+- keymaps 缺失只 `::warning`（不 fail）；主 .so 缺失/过小/架构不对则 fail。
+- 构建期生成物 `app/src/main/jniLibs/`、`app/src/main/assets/qemu/` **不入库**（`.gitignore` 已忽略）。
+- 手动演练：`gh workflow run apk-with-core.yml -R Sakurakilove/mirage-droid`（自动找最近一次成功的 qemu-android run）。
 
 ### `firmware-smoke.yml` — 固件开机冒烟（仅手动）
 

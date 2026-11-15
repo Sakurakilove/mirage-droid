@@ -76,6 +76,7 @@ QEMU_SRC=work/ci-release/qemu-src bash scripts/ci/build-qemu-native.sh work/ci-r
 | `android.yml` | push/PR（app/core/gradle 相关路径）、手动 | ~2–3 min | Artifact `mirage-droid-debug`（debug APK）、`android-test-report` |
 | `host-tests.yml` | push/PR（相关路径）、手动 | ~3–6 min | Artifact `junit-report`、`devicelib-logs` |
 | `qemu-android.yml` | `core/ndk/**`、`scripts/ci/**`、自身变化 / 手动（qemu-core） | 20–40 min（ccache 命中后 5–10 min） | Artifact `qemu-android-arm64`（`libqemu-system-arm.so` + 依赖，arm64-v8a）、失败时 `qemu-android-logs` |
+| `apk-with-core.yml` | `qemu-android` 成功后自动 / 手动（可指定 run_id）/ push main 可选 | ~5–8 min | Artifact `mirage-droid-core-debug`（**可真开机的 APK** + BUILD-INFO + SHA256SUMS） |
 | `firmware-smoke.yml` | **仅手动** `workflow_dispatch` | 30–60 min | 截图 PNG + UART/QEMU/console 日志（**唯一真实开机验证通道**；固件不入 artifact） |
 | `release.yml` | tag `v*`、手动 | ~4–6 min | GitHub Release（APK + 源码快照 + 校验/合规文件） |
 
@@ -102,7 +103,19 @@ gh run view <run-id> -R Sakurakilove/mirage-droid --log
   `mkdevice provision`+`verify` → 启动 QEMU → 每 5s QMP `screendump` → `png-nonblack.py` 判定非全黑。
 - 失败会打印 UART/QEMU/console 日志尾部并把截图与日志上传 artifact；固件与镜像永不进入 artifact。
 
-### 2.2 release 流程
+### 2.2 带核心 APK（真开机交付，`apk-with-core.yml`）
+
+- 普通 `android.yml` 产出的是不含模拟核心的空壳 APK；**能让固件真正跑起来的 APK 走 `apk-with-core.yml`**。
+- 触发：`qemu-android` 成功后自动（`workflow_run`），或手动 `gh workflow run apk-with-core.yml`
+  （可传 `run_id`；留空自动取最近一次成功的 qemu-android run）。
+- 流程：下载 qemu artifact → 解包校验（AArch64/bionic/`Board profiles`/无 glibc/大小）→
+  `lib/*.so` → `app/src/main/jniLibs/arm64-v8a/`、keymaps → `app/src/main/assets/qemu/pc-bios/keymaps/` →
+  `assembleDebug` → APK 内断言（主 .so 存在且 ≥1 MiB、.so 数量、keymaps）→ 上传 `mirage-droid-core-debug`。
+- 注意：`app/src/main/jniLibs/**` 与 `app/src/main/assets/qemu/**` 是构建期生成物（`.gitignore` 已忽略），
+  本地不要手放；keymaps 缺失只告警，主 .so 缺失会 fail。
+- 安装到真机：下载 artifact → `adb install -r mirage-droid-core-debug.apk`，再在 App 内导入固件。
+
+### 2.3 release 流程
 
 1. 触发：push tag `v*`；或手动 `Actions → release → Run workflow`（输入 `tag`，可选 `dry_run/draft/prerelease`）。
 2. 构建：有签名 Secrets → `assembleRelease` + `zipalign`/`apksigner`；无 → `assembleDebug`（debug 签名，
@@ -125,6 +138,7 @@ gh workflow run release.yml -R Sakurakilove/mirage-droid -f tag=v0.0.0-ci -f dry
 | JUnit 报告 | `app/build/reports/tests/testDebugUnitTest/` | Artifact `junit-report` |
 | devicelib 二进制 | 由 `tools/build_devlib.sh` 决定 | 构建日志 artifact `devicelib-logs` |
 | 镜像（NOR/NAND） | `mkdevice provision --device <dir>` 输出的 `nor.img`/`nand.img` | 仅在 firmware-smoke 临时目录（不保存） |
+| 带核心 APK（真开机） | —（CI 生成） | Artifact `mirage-droid-core-debug`（APK + BUILD-INFO + SHA256SUMS） |
 | 发布 APK/源码 | `dist/`（本地模拟流程时） | GitHub Release assets（`mirage-droid-<ver>.apk` 等） |
 
 ## 4. 固件策略（重要）
@@ -146,6 +160,9 @@ gh workflow run release.yml -R Sakurakilove/mirage-droid -f tag=v0.0.0-ci -f dry
 | APK 体积告警（>100 MiB） | 检查是否误打包 qemu/固件/大资源；`android.yml` 的 APK 大小报告在运行摘要里 |
 | release 签名失败 | 4 个 `KEYSTORE_*` Secrets 必须同时存在；`base64 -d` 能还原 keystore；本地复现：`KEYSTORE_FILE=… bash scripts/release/sign-apk.sh some.apk` |
 | actionlint 报错 | 先跑 `python3 scripts/release/validate_workflows.py` 看结构错误；再用固定版本 actionlint 复核 |
+| 没有 `mirage-droid-core-debug` artifact | `qemu-android` 还没成功；或 `apk-with-core.yml` 跳过（看运行摘要）。手动：`gh workflow run apk-with-core.yml` |
+| `apk-with-core` 报“缺少主程序” | qemu artifact 布局不对（`qemu-android` 的 package 步骤产物异常）；查看上一步 `/qemu-artifact` 文件列表 |
+| `apk-with-core` 警告缺 keymaps | qemu 产物没带 `share/qemu/keymaps/en-us`；APK 仍可启动，但 VNC 键盘不可用 |
 | `firmware-smoke` 报“依赖缺失” | 缺少 `scripts/ci/build-qemu-native.sh` 或 `tools/build_devlib.sh`（已合入；若再出现说明回退/分支不对）。**已收紧为 fail，不再 SKIP** |
 | 固件相关步骤失败但日志无链接 | 固件 URL 需是直链（`curl -fL` 可下载），且 OTA zip 内含 `vela_ap.bin`/`vela_resource.bin` |
 
