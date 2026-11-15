@@ -327,8 +327,11 @@ int dl_provision(const dl_profile *profile, const dl_identity *identity,
         }
         have_nand = 1;
         /* bind_config_dir may be NULL: the BindTemplate databases are
-         * embedded in the library then. */
-        if (options->seed_bind && bind && bind->bound) {
+         * embedded in the library then. Only the raw-record profiles seed
+         * /data; littlefs-factory devices (q66/p67/q63) keep their bind
+         * state in /factory.prop and get an erased /data, as Mirage does. */
+        if (options->seed_bind && bind && bind->bound &&
+            profile->factory.format != DL_FACTORY_LITTLEFS) {
             rc = seed_bind(nand_path, spec, bind, options->bind_config_dir, ap_path);
             if (rc != DL_OK) {
                 return rc;

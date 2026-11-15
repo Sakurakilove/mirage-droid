@@ -75,6 +75,28 @@ qemu-system-arm \
 The NOR image is erased (0xFF) with only the factory data written: QEMU
 installs the `-kernel` AP image into the boot NOR itself on every boot.
 
+## Bind state and /data
+
+A device that is already bound to a companion starts up without the pairing
+flow. Where that state lives depends on the profile's factory format:
+
+- `rawInfo` / `p65Record` profiles (p65, q65, n66, o66, n67): Mirage seeds the
+  `persist.db` / `misc/bt/*.db` yaffs2 databases into the erased `/data`
+  partition. `mkdevice provision` does the same, so `/data` starts with those
+  few objects.
+- `littlefs` profiles (q66, p67, q63): the bind keys are `persist.*` entries in
+  `/factory.prop`; `/data` is left fully erased for the firmware to format
+  itself. `tools/blank_nand_data.py` erases a `/data` region in an existing
+  image when an older binary seeded it:
+
+  ```sh
+  python3 tools/blank_nand_data.py devices/q66/nand.img \
+      --first-page 65536 --pages 196608 --page-size 2048 --oob 64
+  ```
+
+`mkdevice provision --no-bind` builds a never-paired device (no `persist.*`
+entries and an erased `/data`).
+
 ## Storage layouts (p65 example)
 
 | image | content |

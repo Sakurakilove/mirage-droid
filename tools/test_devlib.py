@@ -154,6 +154,21 @@ def test_p65_nor(tmp):
     check(whole[0xCC0000 + 256:] == b"\xff" * (0x1000000 - 0xCC0000 - 256),
           "NOR erased after the record")
 
+    # optional AP installation into the boot NOR (real-NOR images carry it;
+    # qemu installs -kernel itself, but the CLI supports both)
+    ap = os.path.join(tmp, "p65-synth-ap.bin")
+    ap_bytes = (b"# boot info\nCHIP=best1502p\nFLASH_SIZE=0x1000000\n"
+                b"OTA_CODE_OFFSET=0xC0000\nmiwear.watch.p65\n" + b"AP" * 64)
+    with open(ap, "wb") as f:
+        f.write(ap_bytes)
+    nor_ap = os.path.join(tmp, "p65-nor-ap.img")
+    run("nor", "--profile", "p65", "--out", nor_ap, "--did", did, "--psn",
+        "QEMU1502123456789", "--mac", mac, "--ap", ap)
+    check(read_at(nor_ap, 0xC0000, len(ap_bytes)) == ap_bytes,
+          "AP installed into the NOR at OTA_CODE_OFFSET")
+    check(read_at(nor_ap, 0xCC0000, 6) == bytes([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+          "factory record survives AP installation")
+
     out, _, _ = run("factory-read", "--profile", "p65", "--image", nor)
     check("ro.factory.did=%s" % did in out, "factory-read returns the did")
     check("ro.factory.mac_bt=%s" % mac in out, "factory-read returns the MAC")
@@ -179,6 +194,77 @@ def test_q66_nor(tmp):
     whole = read_at(nor, 0, 0x1000000)
     check(whole[0:32256 * 512] == b"\xff" * (32256 * 512),
           "q66 NOR erased before the factory partition")
+
+
+# ---------------------------------------------------------------------------
+# 4b. factory records vs an independent reference implementation
+# ---------------------------------------------------------------------------
+
+def _mirage_p65_record(did, psn, mac, key, fsn, sku, size=256):
+    """P65Record.partition() from Mirage ImageBuilder.swift, in Python."""
+    rec = bytearray(size)
+    macb = bytes(int(x, 16) for x in mac.split(":"))
+    rec[8:14] = macb
+    rec[14:22] = struct.pack(">Q", int(did))
+    rec[22:38] = key.encode()[:16].ljust(16, b"0")
+    rec[39:59] = psn.encode()[:20].ljust(20, b"\0")
+    rec[63:77] = fsn.encode()[:14].ljust(14, b"\0")
+    rec[77:86] = sku.encode()[:9].ljust(9, b"\0")
+    return bytes(rec)
+
+
+def _mirage_rawinfo(did, psn, mac, size=8192):
+    """RawInfo.partition() from Mirage ImageBuilder.swift, in Python."""
+    rec = bytearray(b"\xff" * size)
+    macb = bytes(int(x, 16) for x in mac.split(":"))
+    rec[0x8A:0x90] = macb
+    rec[0x92:0x92 + len(did)] = did.encode()
+    rec[0x14F:0x14F + len(psn)] = psn.encode()
+    rec[0:2] = b"\x55\x9a"
+    crc = 0
+    for byte in rec[12:1291]:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xEDB88320 if crc & 1 else crc >> 1
+    struct.pack_into("<I", rec, 4, crc & 0xFFFFFFFF)
+    return bytes(rec)
+
+
+def test_factory_reference(tmp):
+    # p65: the whole 256-byte record must match Mirage's bytes.
+    nor = os.path.join(tmp, "p65ref.img")
+    did, psn, mac = "1502000007", "QEMU1502ABC00007", "02:AB:CD:EF:00:11"
+    run("nor", "--profile", "p65", "--out", nor, "--did", did, "--psn", psn,
+        "--mac", mac, "--key", "0123456789ABCDEF", "--fsn", "QEMU1502P00001",
+        "--sku", "M2509W1")
+    got = read_at(nor, 0xCC0000, 256)
+    want = _mirage_p65_record(did, psn, mac, "0123456789ABCDEF",
+                              "QEMU1502P00001", "M2509W1")
+    check(got == want, "p65 record matches the Mirage reference byte-for-byte")
+
+    # n66: the raw 1292-byte record (magic + CRC-32 zero-init + fields).
+    nor = os.path.join(tmp, "n66ref.img")
+    did, psn, mac = "150000123", "QEMU1503N660001", "02:22:33:44:55:66"
+    run("nor", "--profile", "n66", "--out", nor, "--did", did, "--psn", psn,
+        "--mac", mac)
+    got = read_at(nor, 16368 * 512, 8192)
+    want = _mirage_rawinfo(did, psn, mac)
+    check(got == want, "rawInfo record matches the Mirage reference byte-for-byte")
+
+    # q66: /factory.prop text, exact key order and values.
+    nor = os.path.join(tmp, "q66ref.img")
+    run("nor", "--profile", "q66", "--out", nor, "--did", "150999999",
+        "--psn", "QEMU1503Q66000001", "--mac", "02:77:88:99:AA:BB")
+    out, _, _ = run("factory-read", "--profile", "q66", "--image", nor)
+    ident = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    check(ident.get("ro.factory.did") == "150999999", "q66 factory.prop did")
+    check(ident.get("ro.factory.psn") == "QEMU1503Q66000001", "q66 factory.prop psn")
+    check(ident.get("ro.factory.mac_bt") == "02:77:88:99:AA:BB", "q66 factory.prop mac")
+    check(ident.get("persist.setup_wizard") == "1", "q66 factory.prop setup_wizard")
+    check(ident.get("persist.miwear_companion_device_type") == "0",
+          "q66 factory.prop companion type")
+    check(ident.get("persist.miwear_companion_device_mac") == "010000eeffc0",
+          "q66 factory.prop companion mac")
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +375,13 @@ def test_ota_zip(tmp):
           "ap-info parses CHIP/FLASH_SIZE")
     check(parsed["product"] == "miwear.watch.p65", "ap-info product")
 
+    # importing an already unpacked directory keeps the same files
+    out, _, _ = run("ota-import", "--zip", fw, "--out", os.path.join(tmp, "fw2"))
+    check("miwear.watch.p65" in out or "9.9.9" in out,
+          "OTA import from a directory")
+    check(os.path.isfile(os.path.join(tmp, "fw2", "vela_ap.bin")),
+          "directory import copied vela_ap.bin")
+
     # a bare directory with the two images works without any zip
     dev = os.path.join(tmp, "zipdev")
     run("provision", "--profile", "p65", "--firmware", fw, "--device", dev,
@@ -388,6 +481,7 @@ def main():
         test_identity(tmp)
         test_p65_nor(tmp)
         test_q66_nor(tmp)
+        test_factory_reference(tmp)
         test_nand(tmp)
         test_romfs()
         test_ota_zip(tmp)
