@@ -62,6 +62,7 @@ cd "$BUILD"
     --target-list=arm-softmmu \
     --cross-prefix="$SHIM/aarch64-linux-android-" \
     --disable-werror \
+    --extra-ldflags="-Wl,-rpath,\$ORIGIN -Wl,-z,max-page-size=16384" \
     --disable-docs \
     --disable-tools \
     --disable-guest-agent \

@@ -132,7 +132,7 @@ pkgconfig = ['$SHIM/aarch64-linux-android-pkg-config']
 
 [built-in options]
 c_args = ['-O2', '-fPIC']
-c_link_args = ['-Wl,-z,max-page-size=16384']
+c_link_args = ['-Wl,-z,max-page-size=16384', '-Wl,-rpath,\$ORIGIN']
 
 [host_machine]
 system = 'linux'

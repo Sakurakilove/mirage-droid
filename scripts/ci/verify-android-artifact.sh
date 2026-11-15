@@ -95,6 +95,35 @@ for f in "$LIB"/*.so; do
 done
 check "DT_RUNPATH is \$ORIGIN on every file${badrpath:+ (bad:$badrpath)}" test -z "$badrpath"
 
+# PT_LOAD p_offset/p_vaddr congruence: Linux rejects a PIE whose added
+# segments are misaligned (execve -> EINVAL).  This is the check that would
+# have caught the patchelf 0.18 packaging bug before a device crashed.
+badload=""
+for f in "$LIB"/*.so; do
+    if ! python3 - "$f" <<'PYEOF'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+if d[:4] != b'\x7fELF' or d[4] != 2:
+    sys.exit(0)
+phoff = struct.unpack_from('<Q', d, 0x20)[0]
+phentsize = struct.unpack_from('<H', d, 0x36)[0]
+phnum = struct.unpack_from('<H', d, 0x38)[0]
+for i in range(phnum):
+    o = phoff + i * phentsize
+    if struct.unpack_from('<I', d, o)[0] != 1:
+        continue
+    off, vaddr = struct.unpack_from('<QQ', d, o + 8)
+    align = struct.unpack_from('<Q', d, o + 40)[0]
+    if align and (vaddr - off) & (align - 1):
+        sys.exit(1)
+sys.exit(0)
+PYEOF
+    then
+        badload="$badload $(basename "$f")"
+    fi
+done
+check "PT_LOAD offset/vaddr congruence${badload:+ (bad:$badload)}" test -z "$badload"
+
 # The board table Miwear's machine prints for `-M miwear,profile=help` must be
 # in the binary; this is the same acceptance criterion as the Termux run.
 check "contains the board-profile table (profile=help)" bash -c "grep -aq 'Board profiles' '$MAIN'"

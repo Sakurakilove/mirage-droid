@@ -40,3 +40,10 @@ ZLIB_URL="https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz"
 # meson 1.7 is new enough for QEMU 11 (>= 1.5) and glib 2.82, and is old
 # enough to have no Rust/meson-version surprises.
 MESON_VERSION="1.7.2"
+
+# --- packaging tool --------------------------------------------------------
+# patchelf >= 0.19 fixes the PT_LOAD offset/vaddr alignment bug that made
+# patchelf 0.18 output fail execve with EINVAL on a real device.  The CI
+# workflow downloads this pinned release; package-android.sh honours $PATCHELF.
+PATCHELF_VERSION="0.19.3"
+PATCHELF_URL="https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-x86_64.tar.gz"

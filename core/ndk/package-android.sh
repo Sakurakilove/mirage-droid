@@ -61,7 +61,9 @@ READELF="$NDK_BIN/llvm-readelf"
 STRIP="$NDK_BIN/llvm-strip"
 
 [ -x "$BINARY" ] || { echo "error: no emulator binary at $BINARY" >&2; exit 1; }
-command -v patchelf >/dev/null || { echo "error: patchelf is required (apt install patchelf)" >&2; exit 1; }
+PATCHELF="${PATCHELF:-patchelf}"
+command -v "$PATCHELF" >/dev/null 2>&1 || \
+    { echo "error: patchelf is required (apt install patchelf, or set PATCHELF)" >&2; exit 1; }
 
 rm -rf "$OUT"
 mkdir -p "$OUT/lib"
@@ -169,7 +171,7 @@ done
 for f in "$LIBDIR"/*.so; do
     base=$(basename "$f")
     [ "$base" = "libqemu-system-arm.so" ] && continue
-    patchelf --set-soname "$base" "$f"
+    "$PATCHELF" --set-soname "$base" "$f"
 done
 
 for f in "$LIBDIR"/*.so; do
@@ -177,10 +179,18 @@ for f in "$LIBDIR"/*.so; do
         new="${RENAME[$orig]}"
         [ "$orig" = "$new" ] && continue
         if needed_of "$f" | grep -qxF "$orig"; then
-            patchelf --replace-needed "$orig" "$new" "$f"
+            "$PATCHELF" --replace-needed "$orig" "$new" "$f"
         fi
     done
-    patchelf --set-rpath '$ORIGIN' "$f"
+    rpath=$("$READELF" -d "$f" | sed -n 's/.*\(RUNPATH\|RPATH\).*\[\(.*\)\]/\2/p' | head -1)
+    if [ "$rpath" != '$ORIGIN' ]; then
+        # The bundled files are linked with -Wl,-rpath,'$ORIGIN' (see
+        # core/ndk/gen-cross.sh / build-qemu.sh), so this should only run for
+        # a file built outside those scripts.  patchelf grows .dynstr here,
+        # which is where old patchelf versions used to corrupt PT_LOAD
+        # alignment; the congruence check below catches that.
+        "$PATCHELF" --set-rpath '$ORIGIN' "$f"
+    fi
 done
 
 if [ "${MIRAGE_STRIP:-1}" != "0" ] && [ -x "$STRIP" ]; then
@@ -200,6 +210,32 @@ interp=$("$READELF" -l "$LIBDIR/libqemu-system-arm.so" | \
     sed -n 's/.*interpreter: \([^]]*\).*/\1/p' | head -1)
 interp=${interp%]}
 [ "$interp" = "/system/bin/linker64" ] || fail "unexpected ELF interpreter: '$interp' (want /system/bin/linker64)"
+
+# Linux execve()/mmap() require p_vaddr == p_offset (mod p_align) for every
+# PT_LOAD.  patchelf < 0.19 could append a relocated .dynamic segment that
+# violates this, producing a binary the kernel rejects with EINVAL; a device
+# would just show a crash.  Catch it at package time instead.
+for f in "$LIBDIR"/*.so; do
+    python3 - "$f" <<'PYEOF' || fail "PT_LOAD alignment is invalid after patching: $f"
+import struct, sys
+path = sys.argv[1]
+d = open(path, 'rb').read()
+if d[:4] != b'\x7fELF' or d[4] != 2:
+    sys.exit(0)
+phoff = struct.unpack_from('<Q', d, 0x20)[0]
+phentsize = struct.unpack_from('<H', d, 0x36)[0]
+phnum = struct.unpack_from('<H', d, 0x38)[0]
+for i in range(phnum):
+    o = phoff + i * phentsize
+    if struct.unpack_from('<I', d, o)[0] != 1:      # PT_LOAD
+        continue
+    off, vaddr = struct.unpack_from('<QQ', d, o + 8)
+    align = struct.unpack_from('<Q', d, o + 40)[0]
+    if align and (vaddr - off) & (align - 1):
+        print(f"{path}: PT_LOAD offset={off:#x} vaddr={vaddr:#x} align={align:#x}")
+        sys.exit(1)
+PYEOF
+done
 for n in $(needed_of "$LIBDIR/libqemu-system-arm.so"); do
     is_platform_lib "$n" && continue
     short=$(short_name "$n")

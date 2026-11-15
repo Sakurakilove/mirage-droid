@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 75
     env:
       NDK_VERSION: r27c
+      PATCHELF_VERSION: '0.19.3'
       NDK_API: '28'
       NDK_ZIP: /opt/ndk-cache/android-ndk-r27c-linux.zip
       DEPS: /opt/mirage-deps
@@ -63,6 +64,20 @@ jobs:
           meson --version
           ninja --version
           ccache --version | head -1
+
+      - name: Install patchelf ${{ env.PATCHELF_VERSION }}
+        run: |
+          # patchelf from the distro is 0.18, whose relocated .dynamic segment
+          # breaks PT_LOAD alignment and makes the binary fail execve with
+          # EINVAL on a device.  0.19.x is fixed; use the pinned release.
+          curl -fsSL --retry 3 --connect-timeout 30 -o "$RUNNER_TEMP/patchelf.tgz" \
+            "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-x86_64.tar.gz"
+          mkdir -p /opt/patchelf
+          tar -xzf "$RUNNER_TEMP/patchelf.tgz" -C /opt/patchelf
+          bin=$(find /opt/patchelf -type f -name patchelf | head -1)
+          test -n "$bin"
+          echo "PATCHELF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
 
       - name: Restore pinned NDK zip (fallback when the runner has no r27)
         uses: actions/cache@v4
