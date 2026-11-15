@@ -166,7 +166,8 @@ def test_p65_nor(tmp):
         "QEMU1502123456789", "--mac", mac, "--ap", ap)
     check(read_at(nor_ap, 0xC0000, len(ap_bytes)) == ap_bytes,
           "AP installed into the NOR at OTA_CODE_OFFSET")
-    check(read_at(nor_ap, 0xCC0000, 6) == bytes([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+    check(read_at(nor_ap, 0xCC0000 + 8, 6) ==
+          bytes([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
           "factory record survives AP installation")
 
     out, _, _ = run("factory-read", "--profile", "p65", "--image", nor)
