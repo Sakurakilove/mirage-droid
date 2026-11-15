@@ -25,5 +25,6 @@ fixtures/
 
 # 本机资料
 research/
+work/
 *.apk
 *.aab
